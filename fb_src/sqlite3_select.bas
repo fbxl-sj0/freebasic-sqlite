@@ -4827,8 +4827,14 @@ Function sqlite3Select CDecl Alias "sqlite3Select" ( _
     If nColumn > pParse->db->aLimit(SQLITE_LIMIT_COLUMN) Then Return SQLITE_TOOBIG
     If nColumn > SQLITE_MAX_VDBE_OP - pParse->nMem Then Return SQLITE_TOOBIG
     pParse->nMem += nColumn
-    If pDestination->eDest = SRT_Output AndAlso pParse->colNamesSet = 0 Then _
-        sqlite3VdbeSetNumCols(pVdbe, nColumn)
+    If pDestination->eDest = SRT_Output AndAlso pParse->colNamesSet = 0 Then
+        ' Source-less SELECTs still need the full output metadata pass. This
+        ' preserves column-origin information for scalar subqueries in the
+        ' result list, as well as the declared type and result-column names.
+        sqlite3GenerateColumnNames(pParse, pSelect)
+        If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
+        If pParse->nErr <> 0 Then Return SQLITE_ERROR
+    End If
     If pVdbe->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
 
     Dim limitRegister As SQLITE_C_INT = 0

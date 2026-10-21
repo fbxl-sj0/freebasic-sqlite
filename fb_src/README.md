@@ -8768,3 +8768,48 @@ allocations remaining. Every C case label is present in the FreeBASIC logs;
 the FreeBASIC run adds 66 allocation-failure cases in `collate1.test`.
 Results are in `fb_src/build/collation-next12-20261021/` and
 `fb_src/build/c-udl-collation-retest-20261021/`.
+
+## Compact expression duplication and source-less column metadata (2026-10-21)
+
+`sqlite3ExprDup(..., EXPRDUP_REDUCE)` now stores the upstream compact layouts.
+Token-only nodes end before `pLeft`; common nodes end before `iTable`; left/right
+expression trees and their inline token strings share an aligned SQLite-owned
+buffer. Child records carry `EP_Static`, and token-only cleanup does not touch
+fields beyond its allocated prefix. Explicitly full-size, outer-join, window,
+subroutine, and debug `EP_NoReduce` expressions retain the full layout.
+
+The source-less SELECT path now calls `sqlite3GenerateColumnNames()`. This
+restores the output metadata pass for scalar subqueries and fixes the three
+column-origin failures in `capi2.test`.
+
+An isolated `SQLITE_DEBUG`/`SQLITE_TEST` FreeBASIC library and compatibility
+fixture passed `capi2.test` 145/145. The compact-expression regression set
+passed 30,539 unchanged upstream invocations across default, view, ALTER,
+trigger, SELECT/subquery, schema/index/ALTER/expression/window fault tests.
+All tracked SQLite allocations were freed. Logs are under
+`fb_src/build/capi2-metadata-fix/compact-regressions/` and
+`fb_src/build/capi2-metadata-fix/capi2.test.log`.
+
+At 2026-10-21 19:42 UTC, that older full run had completed 678 of 1,516 jobs,
+with 832 ready and four running. Its remaining recorded failures were three
+`capi2.test` origin-name cases (fixed and retested above) and the four
+ICU-tokenizer `e_fts3.test` expectation mismatches that also occur on the C
+reference. The run's `wherefault.test` passed 6,322 invocations. The full
+compact-profile `wherefault.test` attempt exceeded its 900-second harness
+timeout while other CPU-heavy jobs were active. Its nested-query OOM section
+was later isolated and passed; the two `do_malloc_test` stress sections remain
+unverified in the compact profile.
+
+The next12 full-suite runner was interrupted at 803 clean jobs. Its database
+and log remain in `fb_src/build/full-udl-fb-next12-clean-20261021/`; it had
+three capi2 origin-name failures (fixed and retested above) and four C-shared
+ICU-tokenizer expectation mismatches in `e_fts3.test`.
+
+The corrected full-feature library and Tcl fixture are built in
+`fb_src/build/full-udl-fb-next13/`. The unchanged metadata-enabled
+`capi2.test` passes 145/145 with no tracked leaks. The nested-query OOM portion
+of `wherefault.test`, selected with `--match=wherefault-3*`, passes 201,400
+runner invocations with no leaks. A clean next13 full suite is now running in
+`fb_src/build/full-udl-fb-next13-clean-20261021/` with
+`testfixture_fb_compat_next13`; its initial snapshot had six completed jobs,
+1,506 ready jobs, four running workers, and no failures.

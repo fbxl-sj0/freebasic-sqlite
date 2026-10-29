@@ -1,0 +1,8 @@
+; Project: SQLite FreeBASIC port
+; File: wal_seh_msvcrt.def
+; Purpose: Resolve the small C runtime helper emitted by FreeBASIC in the smoke test.
+; This file intentionally does not contain the C runtime implementation.
+LIBRARY msvcrt.dll
+EXPORTS
+    memset
+; end of wal_seh_msvcrt.def

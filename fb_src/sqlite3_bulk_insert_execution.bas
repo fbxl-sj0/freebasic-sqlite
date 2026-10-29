@@ -2647,19 +2647,27 @@ Sub sqlite3GenerateConstraintChecks CDecl Alias "sqlite3GenerateConstraintChecks
                 c2fb_temp_128 = CPtr(SQLITE_C_INT Ptr, @(arg0->iSelfTab))
                 c2fb_temp_129 = Cast(SQLITE_C_INT, Cast(SQLITE_C_INT, &O0ULL))
                 (*c2fb_temp_128) = c2fb_temp_129
-                ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+                sqlite3VdbeComment(local0, StrPtr("%s column %d"), _
+                    local1->zName, local4)
+#endif
             Else
                 If (-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, ((local48 = (Cast(SQLITE_C_INT, (-Cast(SQLITE_C_INT, 1ULL)))))))) OrElse (-Cast(SQLITE_C_INT, ((local48 = Cast(SQLITE_C_INT, arg1->iPKey))))))))) Then
                     c2fb_temp_130 = Cast(SQLITE_C_INT, arg5)
                     local49 = c2fb_temp_130
                     sqlite3VdbeAddOp2(local0, Cast(SQLITE_C_INT, 84ULL), local49, Cast(SQLITE_C_INT, (local42 + local4)))
-                    ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+                    sqlite3VdbeComment(local0, StrPtr("rowid"))
+#endif
                 Else
                     ' empty C statement
                     c2fb_temp_131 = Cast(SQLITE_C_INT, Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, sqlite3TableColumnToStorage(CPtr(Any Ptr, arg1), local48)) + arg5)) + Cast(SQLITE_C_INT, 1ULL))))
                     local49 = c2fb_temp_131
                     sqlite3VdbeAddOp2(local0, Cast(SQLITE_C_INT, 83ULL), local49, Cast(SQLITE_C_INT, (local42 + local4)))
-                    ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+                    sqlite3VdbeComment(local0, StrPtr("%s"), _
+                        arg1->aCol[local48].zCnName)
+#endif
                 End If
             End If
         c2fb_flow_21:
@@ -2668,7 +2676,9 @@ Sub sqlite3GenerateConstraintChecks CDecl Alias "sqlite3GenerateConstraintChecks
         Wend
         c2fb_flow_20:
         sqlite3VdbeAddOp3(local0, Cast(SQLITE_C_INT, 99ULL), local42, local1->nColumn, arg2[local5])
-        ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(local0, StrPtr("for %s"), local1->zName)
+#endif
         ' empty C statement
 #ifdef SQLITE_DEBUG
         sqlite3VdbeReleaseRegisters( _

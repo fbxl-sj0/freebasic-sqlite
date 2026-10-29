@@ -26,6 +26,11 @@
 
 #include once "sqlite3_api_constants.bi"
 
+' Internal VFS hint used by the pager after a rollback, from src/os.h.
+#ifndef SQLITE_FCNTL_DB_UNCHANGED
+#define SQLITE_FCNTL_DB_UNCHANGED &HCA093FA0UL
+#endif
+
 ' Match sqliteInt.h's platform default while allowing an explicit build override.
 #ifndef SQLITE_MAX_MMAP_SIZE
 #if defined(__FB_LINUX__) OrElse defined(__FB_WIN32__) OrElse _

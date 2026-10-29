@@ -24,6 +24,10 @@
 #include once "sqlite3_vfs.bi"
 #include once "sqlite3_constants.bi"
 
+Declare Function sqlite3SafetyCheckOk CDecl Alias "sqlite3SafetyCheckOk" ( _
+    ByVal db As sqlite3 Ptr _
+) As SQLITE_C_INT
+
 Private Const SQLITE_BUSY_RETRY_COUNT As SQLITE_C_INT = 12
 Dim Shared As Const UByte sqlite3BusyDelay(0 To 11) = _
     {1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100}
@@ -77,6 +81,9 @@ Function sqlite3_busy_handler CDecl Alias "sqlite3_busy_handler" ( _
     ByVal xBusyArgument As Any Ptr, _
     ByVal pArgument As Any Ptr _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return SQLITE_MISUSE
+#endif
     If db = 0 Then Return SQLITE_MISUSE
     sqlite3_mutex_enter(db->mutex)
     db->busyHandler.xBusyHandler = CPtr(SqliteBusyCallback, xBusyArgument)
@@ -94,6 +101,9 @@ Function sqlite3_busy_timeout CDecl Alias "sqlite3_busy_timeout" ( _
     ByVal db As sqlite3 Ptr, _
     ByVal milliseconds As SQLITE_C_INT _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return SQLITE_MISUSE
+#endif
     If db = 0 Then Return SQLITE_MISUSE
     sqlite3_mutex_enter(db->mutex)
     If milliseconds > 0 Then

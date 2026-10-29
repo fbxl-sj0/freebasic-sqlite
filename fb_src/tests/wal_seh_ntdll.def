@@ -1,0 +1,8 @@
+; Project: SQLite FreeBASIC port
+; File: wal_seh_ntdll.def
+; Purpose: Resolve the Windows x64 structured-exception dispatcher in the smoke test.
+; This file intentionally does not define exception handling behavior.
+LIBRARY ntdll.dll
+EXPORTS
+    __C_specific_handler
+; end of wal_seh_ntdll.def

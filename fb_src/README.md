@@ -24,16 +24,30 @@ at `fts3corrupt4-25.5`; the other 113,518 passed, and no tracked allocations
 remained. The standalone `fts3corrupt4.test` run passes 159/159. An earlier
 broader run used the library's 4096-byte default instead of the fixture's
 1024-byte page size; its 106,799 passing cases and 32 failures are superseded
-by the matched-profile runs above. Test-support code remains in C or Tcl so
+by the matched-profile runs above. A later all-feature suite run recorded
+malformed-image errors at `fts3corrupt4-25.4` and `25.5`; an immediate isolated
+FreeBASIC rerun passed. Three paired C/FreeBASIC runs with fixed PRNG seeds
+matched exactly: both passed for seeds 1 and 42, and both reported the same
+`25.1` malformed-image error for seed 12345. A further 20-seed paired sweep had
+no C/FreeBASIC mismatches: both passed 16 seeds, and both failed four, including
+`25.4` with seed 1002 and `25.5` with seed 1005. Both also failed `25.1` with
+seeds 1007 and 1009. These corruption errors are seed-dependent baseline
+behavior, not port-specific differences in the tested inputs. Seeds 1002 and
+1005 were rerun against the feature-matched C fixture; both engines again fail
+the same individual cases. Test-support code remains in C or Tcl so
 the unchanged upstream scripts can exercise the FreeBASIC engine; the
 FreeBASIC SQLITE_TEST profile supplies the extension SQL hooks those scripts
 call.
 Session has 175 unique
 translated procedures across its core, changeset, and simple-API modules. Its
-full public API is linked in the feature profile, and the unchanged 44-script
-Session suite passes 21,006 invocations. Test-support code remains in C or Tcl
-so the unchanged upstream suite can exercise the FreeBASIC engine through the
-existing fixture.
+full public API is linked in the feature profile. A direct comparison of the
+unchanged 44-script Session suite completed 23,820 FreeBASIC invocations and
+20,792 C-reference invocations, with zero errors in either build and matching
+job names, completion states, and error counts. Only the three allocation-
+fault scripts differ in invocation counts because their failure schedules
+vary between builds; see `fb_src/build/session-diff/comparison-summary.log`.
+Test-support code remains in C or Tcl so the upstream suite exercises the
+FreeBASIC engine through the existing fixture.
 
 `PORTING_FUNCTIONS.csv` tracks source-definition rows. A C function name can
 appear more than once when mutually exclusive implementation files define it,
@@ -49,11 +63,20 @@ the 192,194 in-scope engine and public-ABI source lines when measured by
 function-definition lines; that ratio is not a completeness score. The
 remaining source lines include declarations, macros, static data, comments,
 and generated interfaces. The final 20 body entries include 11 test/debug
-helpers and nine upstream-disabled or historical definitions. Eight are off
-by default to match upstream and compile under the optional
-`SQLITE3_FB_COMPILE_DISABLED_BODIES` validation define; the historical
-serial-type definition is represented by the live implementation in
-`sqlite3_vdbe_serial.bas`.
+helpers and nine upstream-disabled or historical definitions. The 11 helpers
+compile in the `SQLITE_DEBUG` and `SQLITE_TEST` audit profile. These eight
+upstream-disabled bodies compile under the optional
+`SQLITE3_FB_COMPILE_DISABLED_BODIES` validation define: `sharedLockTrace`,
+`ptrmapCheckPages`, `pcachePageTrace`, `pcacheDump`, `memdbCheckReservedLock`,
+`memdbSectorSize`, `memdbDelete`, and `memdbCurrentTime`. They stay disabled in
+ordinary builds to match upstream. The historical serial-type definition is
+represented by the live implementation in `sqlite3_vdbe_serial.bas`.
+`make -C fb_src audit-function-bodies` checks the index and builds the complete
+audit library. A fresh 2026-10-28 run completed with exit status 0; all 3,263
+indexed bodies matched, the 279-slot extension table had no unexpected null
+entries, and the full audit library rebuilt. Its report is
+`fb_src/build/function-body-audit-20261028.log`. The earlier 2026-10-27 report
+is retained at `fb_src/build/function-body-audit-20261027.log`.
 Body presence does not establish semantic parity. Run
 `make -C fb_src reconcile-function-status` to reconcile ordinary name matches.
 The command preserves custom statuses such as `Needs variant port` and
@@ -63,6 +86,16 @@ changes, then reconcile it again and re-audit duplicated names. The coverage
 checker searches integrated FreeBASIC source units and excludes build output
 and nested candidate-conversion directories, so an unintegrated C2FB candidate
 cannot satisfy a function row.
+
+The core index covers `src/` only. `PORTING_EXTENSION_FUNCTIONS.csv` separately
+indexes 1,354 definitions across the 28 selected FTS3/4, FTS5, R-Tree/GeoPoly,
+and Session C implementation files. All 1,339 definitions used by the selected
+built-in and debug profiles have FreeBASIC bodies, including all nine debug
+helpers found in the audit. The remaining 15 rows are classified as
+upstream test support, upstream-disabled code, standalone loadable-extension
+entry points, or optional FTS3 merge tracing.
+`make -C fb_src audit-extension-function-bodies` passes the active body rows
+and reports these classified exclusions.
 
 ## FTS3/4 port progress (2026-10-20)
 
@@ -1178,13 +1211,28 @@ procedure candidates, and none matched an uncovered function row. The focused
 C2FB gained support for zero-initialized local static arrays. That helper is
 integrated under the same guards as the C source. `walHandleException` has a
 FreeBASIC body that releases transient WAL locks and restores deferred WAL-index
-state, and it compiles in the SEH profile. The FreeBASIC WAL module still has no
-`__try`/`__except` boundary to call it. The exception filter and fault injector
-now have bodies with the upstream exception code and argument layout, and the
-default, Windows SEH, and debug Windows SEH WAL objects compile. Without the
-boundary, WAL operations do not invoke the filter, and injected faults are not
-caught. Default and debug/test library builds pass; runtime behavior is
-unverified. The Windows thread callback `sqlite3ThreadProc` is
+state. The FreeBASIC WAL wrappers now use a small Windows-only adapter in
+`sqlite3_win_seh_bridge.c` to establish SQLite's lexical `__try`/`__except`
+frame. Filtering, lock cleanup, deferred index-page restoration, allocation
+cleanup, and fault-injection decisions remain in FreeBASIC. FreeBASIC has no
+structured-exception syntax, so the adapter supplies only that compiler-specific
+frame.
+
+FBC generated the WAL module for Win32 and Win64, and Clang compiled both
+generated C units and the adapter into COFF objects. An isolated FreeBASIC
+callback harness under Wine raises an in-page exception and verifies that the
+filter sees its status, the handler runs, and the normal-exit callback is
+skipped. Run the repeatable check with
+`make -C fb_src check-wal-seh-bridge-wine`. The full SQLite Windows DLL and its
+mapped-WAL runtime path still need a cross-toolchain build and execution.
+
+The unchanged upstream `wal.test`, `walfault.test`, and `walcrash.test` pass
+581/581, 7,299/7,299, and 2,971/2,971 in a matched all-features
+`SQLITE_DEBUG`/`SQLITE_TEST` Linux profile, with no tracked allocations. With
+`SQLITE_ENABLE_SNAPSHOT`, `snapshot.test` passes 127/127 and
+`snapshot_fault.test` passes 821/821, also with no tracked allocations. These
+runs check debug try-state bookkeeping when Windows SEH is disabled. The
+Windows thread callback `sqlite3ThreadProc` is
 also ported with the original StdCall convention and `_endthreadex`; the
 Windows target build is unverified. The five constant-propagation helpers from
 `select.c` are ported in `sqlite3_select_constant_propagation.bas` and now run
@@ -2381,11 +2429,46 @@ updates all 15 per-connection limit classes. SQL length, value length, column co
 expression depth, compound SELECT terms, parser-stack growth, VDBE opcode
 allocation, variable numbers, function arguments, and LIKE/GLOB pattern length
 use the connection's configured limits. `SQLITE_LIMIT_ATTACHED` is checked by
-ATTACH, and `SQLITE_LIMIT_TRIGGER_DEPTH` is enforced during trigger generation
-and nested VDBE program entry. `SQLITE_LIMIT_SCHEMA` is checked as schema rows
-are loaded. Sorter initialization caps worker tasks using
-`SQLITE_LIMIT_WORKER_THREADS` and `SQLITE_MAX_WORKER_THREADS`. These paths build;
-runtime behavior is unverified.
+ATTACH, `SQLITE_LIMIT_TRIGGER_STEPS` during trigger construction,
+`SQLITE_LIMIT_TRIGGER_DEPTH` during trigger generation and nested VDBE program
+entry, and `SQLITE_LIMIT_SCHEMA` while schema rows are loaded. Sorter
+initialization caps worker tasks using `SQLITE_LIMIT_WORKER_THREADS` and
+`SQLITE_MAX_WORKER_THREADS`. Under `SQLITE_ENABLE_API_ARMOR`, `sqlite3_limit()`
+checks the connection pointer before reading it and returns `-1` after logging
+misuse, matching upstream.
+
+Focused upstream tests pass `attach.test` 113/113, `createtab.test` 64/64,
+and `trigger1.test` 94/94. `sqllimits1.test` has one error at 15.2, the same
+LIKE/GLOB expectation mismatch seen in the native C reference. The API-armor
+branch compiles with the matching all-feature layout; a Tcl/C smoke confirms a
+NULL connection returns `-1`, with no tracked allocations left at shutdown.
+The connection accessors, row/change counters, `sqlite3_file_control()`,
+`sqlite3_busy_handler()`, and `sqlite3_busy_timeout()` now also validate
+connection state in API Armor builds. The guards also cover client-data access,
+`sqlite3_next_stmt()`, `sqlite3_table_column_metadata()`, virtual-table module
+creation/removal and declaration, `sqlite3_vtab_on_conflict()`, extension loading,
+`sqlite3_overload_function()`, `sqlite3_autovacuum_pages()`, and
+`sqlite3_wal_autocheckpoint()`, plus `sqlite3_blob_open()`. Rejected
+autovacuum registration still invokes its supplied destructor. `sqlite3_db_name()`
+reads its schema slot under the connection mutex. `sqlite3_interrupt()` and
+`sqlite3_is_interrupted()` preserve SQLite's exception for a zombie connection
+whose statements are still alive. The C smoke
+`tests/sqlite_api_armor_connection_smoke.c` opens an in-memory connection,
+keeps a statement alive across `sqlite3_close_v2()`, and checks the live and
+zombie-handle results, including a NULL BLOB output handle on a rejected open.
+It passes against the API Armor FreeBASIC library with the updated virtual-
+table, load-extension, main API, incremental-BLOB, and vtab-declaration
+modules preloaded from FreeBASIC overlays; those artifacts are under
+`build/api-armor-accessor-runtime-20261028/`.
+`sqlite3_serialize()` validates the connection, and `sqlite3_deserialize()` also
+rejects negative size arguments in API Armor builds. The smoke checks their
+misuse returns and verifies that failed serialization leaves its size output
+unchanged against the integrated PREUPDATE-enabled profile.
+The pre-update old/new APIs also reject NULL connection and output pointers in
+API Armor builds. The integrated API Armor plus PREUPDATE_HOOK profile passes
+both the connection smoke and
+`tests/sqlite_api_armor_preupdate_null_smoke.c` without overlays; artifacts are
+under `build/preupdate-api-armor-20261028/`.
 `sqlite3_compileoption_get()` and `sqlite3_compileoption_used()` report the
 sorted FreeBASIC build-profile options. `ENABLE_URI_00_ERROR` appears only in
 builds compiled with `SQLITE_ENABLE_URI_00_ERROR`; the strict URI profile passes
@@ -2912,10 +2995,32 @@ SELECT into the schema. `sqlite3_bulk_finish_trigger.bas` validates and stores
 trigger schema references and SQL text. `sqlite3_bulk_shadow_table.bas`
 resolves a shadow table's virtual-table owner before delegating suffix checks
 to its module. `sqlite3_bulk_start_table.bas` validates the schema and reserves
-the table's schema row and B-tree root page. Final schema generation now has a
-body in `sqlite3_bulk_create_table_repair.bas`; `sqlite3CreateIndex()` remains
-an unresolved dependency. `sqlite3_bulk_objectname.bas` checks
-reserved names and verifies schema-initialization object names.
+the table's schema row and B-tree root page. `sqlite3_bulk_create_table_repair.bas`
+contains final schema generation and manual `sqlite3EndTable()` and
+`sqlite3CreateIndex()` implementations. The index path passes `indexexpr1.test`
+117/117, `index5.test` 4/4, and `index6.test` 74/74; `unique2.test` passes 27/27
+on native and GCC-backend FreeBASIC with matching C results. A direct
+C-versus-FreeBASIC run of 21 DDL/index jobs passes 1,766/1,766 on each fixture
+with identical job names, counts, states, and error totals. Results are under
+`fb_src/build/ddl-index-diff/`.
+The unchanged `without_rowid1.test` through `without_rowid7.test` also pass
+1,473/1,473 on both C `testfixture` and the FreeBASIC-linked fixture. Their
+seven runner rows match exactly on test name, case count, state, and error
+count; results are under `fb_src/build/without-rowid-diff/`.
+`sqlite3_bulk_objectname.bas` checks reserved names and verifies
+schema-initialization object names.
+The `sqlite3_config()` implementation includes every one of the 28 active
+`SQLITE_CONFIG_*` switch cases in `src/main.c`. The unchanged `config.test`,
+`lookaside.test`, `mutex1.test`, `mutex2.test`, `pcache2.test`, `mem3.test`, and
+`mem5.test` pass 148/148 on both C `testfixture` and the FreeBASIC-linked
+fixture, with identical job rows. Feature-guarded and native Windows settings
+remain for separate verification. The `SQLITE_WIN32_MALLOC` profile also passes
+the C config host on both Win32 and Win64 under Wine, including
+`SQLITE_CONFIG_WIN32_HEAPSIZE`, actual SQLite allocation/DDL, post-init guards,
+and log callback delivery. Its 37 Windows VFS callbacks pass the ABI audit on
+both targets. Logs are under `fb_src/build/config-api-diff/` and the
+`win32-clang-seh-win32malloc-20261028` and
+`win64-clang-seh-win32malloc-20261028` build directories.
 `sqlite3_bulk39_main.bas` now closes zombie connections after all statements
 and backup objects finish, releasing attached B-trees, schemas, collations,
 virtual-table modules, extensions, and connection state. Function-registry
@@ -3009,16 +3114,23 @@ to the cumulative count again.
 `SRC` list, plus generated parser/opcode/PRAGMA inputs and the later test-runner
 bridge. It records port status and upstream line count by source file.
 `PORTING_FUNCTIONS.csv`, generated by `fb_tools/c2fb/c2fb.bas functions src`,
-indexes 3,263 C function-definition rows across 80 in-scope source files with
+indexes 3,263 C function-definition rows across 79 in-scope source files with
 line spans and rough size classes. Alternate definitions behind preprocessor
 conditions share one row. Its initial status column is `Needs mapping` so newly
 indexed functions can be reconciled as the port proceeds. Run
 `make -C fb_src reconcile-function-status` to mark rows with a matching
 FreeBASIC body; this reports body presence, not semantic completeness.
-The inventory excludes SQLite extensions and test implementation files. The
-tests themselves remain upstream and in their current languages. SQLite's
+The core index excludes test implementation files. Selected built-in extension
+functions are tracked separately in `PORTING_EXTENSION_FUNCTIONS.csv`; the
+test implementations remain upstream in their existing languages. SQLite's
 engine is over 200,000 source lines, so this is a staged port of its subsystems,
 not a small conversion of a handful of files.
+
+`make -C fb_src audit-core-source-inventory` checks all top-level `src/*.c`
+files against the inventory and function index. On 2026-10-28 it found 125
+source files: 79 indexed implementation files, the data-only `global.c`, and
+45 C test-support/Tcl-adapter files intentionally left upstream. No source
+file was unclassified.
 
 The existing tests remain in their current languages. SQLite's `testfixture`
 build uses private implementation symbols, while the Tcl extension path uses
@@ -3027,7 +3139,7 @@ that API, the Tcl extension can be linked against it and the existing Tcl
 regression scripts can exercise the port. Reusing `testfixture` will also
 require a deliberate compatibility layer for its private test hooks.
 
-The remaining implementation order is:
+The original implementation order (historical) was:
 
 1. Custom allocator configuration, per-connection status, and process initialization.
 2. VFS and operating-system interfaces, including the Windows mutex backend.
@@ -3035,6 +3147,17 @@ The remaining implementation order is:
 4. Table-backed SELECT, DDL/DML compilation, and the virtual database engine.
 5. B-tree, pager, rollback journal, and WAL.
 6. Remaining public API coverage, test hooks, and optional extensions.
+
+That sequence is superseded, not a current backlog. The latest function-body
+audit finds FreeBASIC bodies for all 3,263 indexed in-scope definitions. Body
+presence is not semantic completeness. The all-feature GCC and native FreeBASIC
+full suites complete all 1,516 jobs with matching states and error counts; the
+three failed jobs also fail in targeted native C references. Remaining
+verification gaps include the full Windows Tcl suite and native Windows and
+Apple runtime execution.
+For a live full-suite run, the `testrunner.db` `jobs` table is authoritative:
+check `state`, `ntest`, `nerr`, and `output`. The streaming log may omit failed
+job details even when the database records them.
 
 The source files `sqlite3_tokens.bi`, `sqlite3_keyword_data.bi`,
 `sqlite3_character_classes.bi`, `sqlite3_parser_tables.bi`,
@@ -3223,15 +3346,17 @@ FreeBASIC function table with SQLite's feature flags and callback user data.
 ceilingFunc and logFunc are ported alongside the converted math and percentile
 callbacks. The optional SQLITE_SOUNDEX profile also ports and registers
 soundexFunc. The default, combined math/percentile, soundex-only, and combined
-scalar-feature library builds pass; runtime behavior remains unverified.
+scalar-feature library builds pass. The unchanged `func7.test` and
+`percentile.test` cover math and percentile runtime behavior; the dedicated
+Soundex C-reference smoke below covers its feature-gated registration and
+callback.
 
 
 The optional FILESTAT and WALSTAT profile now registers sqlite_filestat() and
 sqlite_walstat(). C2FB translated both callbacks; the port also supplies the
 pager forwarding routine and WAL-index/checkpoint JSON helpers. The enabled
-library builds. The Windows SEH exception handler used by SQLite around WAL
-diagnostics is not reproduced, and diagnostic runtime behavior remains
-unverified.
+library builds. WAL diagnostics now use the Windows SEH adapter; their Windows
+runtime output remains unverified.
 
 
 The SQLITE_ENABLE_STMT_SCANSTATUS profile now collects scan entries, records
@@ -3299,16 +3424,26 @@ The JSON virtual-table callback table now registers `json_each`, `json_tree`,
 optional root path, and its column callback returns each row's key, value,
 type, atom, id, parent, full key, path, and source JSON. This adds 199 indexed C
 lines and connects the existing eponymous-table lookup path. The default
-threaded library builds; JSON virtual-table behavior remains unverified at
-runtime.
+threaded library builds. A direct C-versus-FreeBASIC run of the unchanged
+`json101.test`, `json102.test`, `json103.test`, `json106.test`, `json107.test`,
+`json108.test`, and `json502.test` passes 45,662/45,662 on each fixture; all
+seven runner rows match exactly. This covers `json_each`/`json_tree` scans,
+JSONB inputs, joins, and mixed JSON scalar/virtual-table use. Results are under
+`fb_src/build/json-core-diff/`.
 
 The JSON registration table now includes the JSON and JSONB scalar overloads,
 the extraction operators, pretty printing, error-position reporting, and the
 four JSON group aggregates. The new pretty/error/aggregate callbacks add 195
-indexed C lines. The default library builds; runtime function behavior remains
-unverified. The debug batch provides `jsonDebugPrintBlob()`, `jsonShowParse()`,
-and `jsonParseFunc()`; the `json_parse()` SQL callback is registered only in
-`SQLITE_DEBUG` builds. Runtime behavior remains unverified.
+indexed C lines. The unchanged `json101.test`, `json103.test`, `json108.test`,
+and `json502.test` pass 328/328 on both C `testfixture` and the FreeBASIC-linked
+fixture, with matching job rows. They cover aggregate output, pretty printing,
+and text/JSONB error positions. Results are in
+`fb_src/build/json-optional-diff/`. The debug batch provides
+`jsonDebugPrintBlob()`, `jsonShowParse()`, and `jsonParseFunc()`; the
+`json_parse()` SQL callback is registered only in `SQLITE_DEBUG` builds. The C
+and FreeBASIC debug fixtures return byte-for-byte identical output for valid
+JSON, JSONB, NULL, and malformed JSON probes; captured output is in
+`fb_src/build/json-debug-parse-diff/`.
 
 JSON path lookup now also performs insert, replace, delete, and set edits. It
 builds nested JSONB object/array tails when an edit creates missing path
@@ -3417,8 +3552,8 @@ the port's UnixFile and UnixLockInfo layouts. Apple proxy conch acquisition,
 path switching, file controls, lock callbacks, AFP byte-range locking, and the
 `unix-afp` VFS run through guarded method tables. VxWorks canonical path IDs
 and named-semaphore locking are also represented. Native Apple and VxWorks
-runtime behavior remains unverified, and automatic filesystem-based proxy
-selection is still unmapped. The Windows source index now
+runtime behavior remains unverified. The automatic proxy-selection path was
+added later; its Apple runtime remains unverified. The Windows source index now
 has bodies for 109 of 109 functions (3,594 of 3,594 indexed C lines). The
 dedicated `sqlite3_os_win_memory.bas` module supplies the optional Win32 heap
 callbacks, method table, compact operation, and reset operation; the general
@@ -3449,8 +3584,8 @@ no-lock, POSIX, dot-file, flock, and NFS methods. POSIX byte-range operations
 route through `unixFileLock`, and final WAL shared-memory disposal goes through
 `unixShmPurge`. Apple-profile object builds pass with `HAVE_GETHOSTUUID=0` and
 with `SQLITE_TEST`, `HAVE_GETHOSTUUID=1`, and a `LOCKPROXYDIR` override. The
-default threaded library build passes. Native Apple runtime behavior and
-automatic filesystem-based proxy selection remain unverified. The source
+default threaded library build passes. Automatic proxy selection is now
+implemented; native Apple proxy runtime behavior remains unverified. The source
 index now has bodies for all 3,243 in-scope definitions and all 124,545 indexed
 function lines; source-body coverage does not establish semantic parity.
 
@@ -4175,13 +4310,20 @@ The feature-enabled C2FB pass over `select.c` supplied the missing
 and origin names into result-column metadata. A feature-profile library build
 and direct C smoke test pass for `SELECT a FROM t`, a view, a nested subquery,
 and an expression result; the test also loads a C extension and confirms the
-database/table/origin API slots are populated. The UTF-16 metadata functions
-compile but were not exercised. The generated feature API table backed 274 of
-279 slots; the default table was restored to 268 of 279. Default release and
-`SQLITE_TEST` library profiles also build after the conditional SELECT changes.
-The C smoke used the system SQLite 3.46.1 headers because this checkout lacks
-the generated 3.54.0 `sqlite3.h`; it checks the stable extension API prefix,
-but a same-version header remains a stronger ABI check.
+database/table/origin API slots are populated. The separate C host
+`fb_src/tests/column_metadata16_smoke.c` now exercises the UTF-16 metadata
+functions against a standalone build with `SQLITE_ENABLE_COLUMN_METADATA`.
+Direct table, view, and scalar-subquery columns return the expected UTF-16
+database, table, and origin names; a constant expression returns NULL metadata.
+The build artifact is `fb_src/build/libsqlite3-fb-column-meta.so`. The generated
+feature API table backed 274 of 279 slots; the default table was restored to
+268 of 279. Default release and `SQLITE_TEST` library profiles also build after
+the conditional SELECT changes.
+This UTF-16 smoke uses the generated SQLite 3.54.0 header and also passes
+against the system SQLite 3.46.1 library. The earlier extension-table smoke
+used system 3.46.1 headers before the generated header was available; it checks
+the stable extension API prefix, but a version-matched native C build remains a
+stronger ABI reference.
 
 The unchanged upstream `with1.test` now passes 119/119, and `altercol.test`
 passes 257/257 after the parser changes; both finish with no tracked leaks.
@@ -6085,7 +6227,10 @@ The `SQLITE_SOUNDEX` FreeBASIC profile builds and matches a C amalgamation
 built with the same option for ten inputs: Robert/Rupert/Rubin, Ashcraft/
 Ashcroft, Tymczak/Pfister, a one-letter word, NULL, and nonalphabetic text.
 The checkout has no dedicated upstream Soundex test file, so this direct
-comparison adds no cases to the focused ledger, which remains at 247,614.
+comparison adds no cases to the focused ledger, which remains at 247,614. The
+reusable C API probe is `tests/sqlite_soundex_api_smoke.c`; the current
+2026-10-28 FreeBASIC and C-reference outputs match in
+`build/soundex-current-20261028/`.
 
 ## Storage-class and record-size runtime checkpoint (2026-10-17)
 
@@ -6825,8 +6970,104 @@ byte-identical. C and FreeBASIC agree on the `EXPLAIN SELECT 1` rows and on the
 ordinary result rows for `SELECT 1`, `SELECT 2147483648`, `SELECT -2147483648`,
 `SELECT 0`, and `SELECT 1+2`. Broader EXPLAIN output still differs in some
 subquery register-release annotations, P4 table/index names, transaction
-comments, and trigger annotations. Those differences remain open; this probe
-adds no upstream test cases to the focused ledger.
+comments, and trigger annotations. The 2026-10-27 follow-up below closes the
+tested trigger, table/index, and transaction-comment cases; aggregate and
+DISTINCT plan differences and other EXPLAIN shapes remain open. This probe adds
+no upstream test cases to the focused ledger.
+
+## Bytecode virtual-table differential checkpoint (2026-10-27)
+
+A feature-enabled C API probe compares the C and FreeBASIC implementations
+with `SQLITE_ENABLE_BYTECODE_VTAB`, `SQLITE_ENABLE_EXPLAIN_COMMENTS`, and
+`SQLITE_ENABLE_STMT_SCANSTATUS`. It covers selected bytecode columns, row IDs,
+P4 and comment formatting, scan-status fields, mode-2 access filtering,
+`tables_used()` table/index rows and write flags, trigger subprograms, and
+invalid or missing SQL errors. The saved C and FreeBASIC outputs are
+byte-identical; their stored logs were compared again on 2026-10-27.
+
+The comparison caught two port defects: `tables_used().wr` returned FreeBASIC's
+true value (-1) instead of SQLite's integer 1, and mode 2 included opcodes
+that do not open a table or index. The port now returns canonical 0/1 values
+and applies the same access-opcode filter as C. It also emits EXPLAIN comments
+for table/index opens and schema transactions in the code-generation paths
+covered by this probe. The logs are
+`fb_src/build/bytecode-vtab-diff/c-scanstatus.log` and
+`fb_src/build/bytecode-vtab-diff/fb-scanstatus.log`; this focused probe does
+not establish parity for every bytecode-vtab input or every debug EXPLAIN
+shape.
+
+## EXPLAIN comments and SQL-result differential checkpoint (2026-10-27)
+
+The C API probe `fb_src/tests/sqlite_explain_rows_diff.c` now compares indexed
+reads, scalar aggregate subqueries, DISTINCT sorting, and INSERT/UPDATE trigger
+programs. It compares both EXPLAIN rows and executed SQL results. The C and
+FreeBASIC libraries use the same SQLite source ID. Their feature and limit
+options match; the C build also reports `ATOMIC_INTRINSICS=1`, and each library
+reports its own compiler name. The thirteen executed query-result sections are
+byte-identical, including LIMIT zero, expression LIMIT, OFFSET, and grouped
+scalar aggregation. These results match with both the default FreeBASIC library
+and the library built with `SQLITE_ENABLE_EXPLAIN_COMMENTS`. Both profiles
+build successfully.
+
+The probe found missing comments for trigger-program start/end/call opcodes,
+`new.*` and `old.*` parameters, rowid reads, and index-record fields. Those
+comments now follow the `SQLITE_ENABLE_EXPLAIN_COMMENTS` guard and match C for
+the exercised trigger and index bytecode. EXPLAIN output now matches for
+indexed SELECT, scalar aggregate subqueries with plain, zero, expression, and
+offset limits, INSERT/UPDATE triggers, and DELETE. The grouped scalar
+aggregate plan still differs (48 C rows, 50 FreeBASIC rows), as does DISTINCT
+sorting (35 C rows, 29 FreeBASIC rows); their executed results match. These two
+plan differences remain open. Current outputs are in
+`fb_src/build/explain-rows-diff-20261027/c.log` and `fb.log`.
+
+## Aggregate and subquery Tcl regression recheck (2026-10-27)
+
+After aligning the ungrouped aggregate LIMIT and `SRT_Mem` result paths with
+SQLite, I built an all-feature `SQLITE_DEBUG` test library and linked the
+unchanged Tcl fixture to it. The unchanged `subquery.test`, `subquery2.test`,
+`limit.test`, `limit2.test`, `aggerror.test`, `aggfault.test`, `aggnested.test`,
+`aggorderby.test`, and `select1.test` through `selectH.test` pass **38,513/38,513**
+invocations with zero errors and no tracked allocation leaks. Per-script logs
+are in `fb_src/build/testfixture-aggregate-full-20261027/`.
+
+## Group-key transfer follow-up (2026-10-27)
+
+Ordered and sorter-backed GROUP BY code now transfers the completed key range
+with `sqlite3ExprCodeMove`, emitting `OP_Move` and clearing the temporary source
+registers as the C implementation does. The matching-profile EXPLAIN probe
+still matches 8/10 plans; the grouped scalar aggregate and DISTINCT plans have
+different surrounding control flow and register allocation, but now use the
+same group-key move operation. All thirteen executed SQL-result sections
+remain byte-identical to C. After rebuilding the all-feature debug library, the
+same 25 unchanged subquery, LIMIT, aggregate, and SELECT scripts pass
+**38,513/38,513** with zero errors and no tracked leaks. Per-script logs are in
+`fb_src/build/testfixture-groupmove-20261027/`; the differential logs are in
+`fb_src/build/explain-groupmove-parity-20261027/`.
+
+## Grouped LIMIT-zero sort fix (2026-10-27)
+
+A 10,000-query C API differential found grouped queries with `LIMIT 0` and an
+outer ORDER BY could either return `SQLITE_CORRUPT` or emit rows when OFFSET was
+also present. The early LIMIT exit skipped the ephemeral sort-cursor opens;
+for `LIMIT 0 OFFSET 2`, output generation also proceeded with an uninitialized
+sort path. `sqlite3SelectCompileGroupedAggregateFromClause()` now emits the
+zero-limit branch after the sort cursors are opened and resolves it after the
+sort tail, so the branch skips both source evaluation and result generation.
+The generated query matrix now matches C for all 10,000 grouped-result queries.
+The C API probe adds ordered grouped `LIMIT 0` and `LIMIT 0 OFFSET 2` cases;
+all **15/15** SQL-result sections match C. The all-feature debug fixture also
+passes the unchanged 25-script aggregate, LIMIT, subquery, and SELECT batch at
+**38,513/38,513**, with no tracked leaks. Logs are in
+`fb_src/build/explain-limit0-fix2-20261027/` and
+`fb_src/build/testfixture-limit0-fix2-20261027/`.
+
+## FTS5 tokenizer debug-profile recheck (2026-10-27)
+
+With the all-feature debug fixture, the unchanged `fts5tokenizer.test`,
+`fts5tokenizer2.test`, `fts5tokenizer3.test`, `fts5tok1.test`, `fts5tok2.test`,
+and `fts5unicode.test` pass **150/150** with no tracked allocation leaks. This
+rechecks built-in tokenizer registration after moving its local record type to
+module scope so the debug feature build emits complete C.
 
 
 ## sqlite3_exec extended-error checkpoint (2026-10-17)
@@ -7419,6 +7660,15 @@ disabled features. The default release library builds successfully with
 CARRAY, unlock-notify, column metadata, and normalization disabled, leaving
 those optional slots absent when their features are not compiled.
 
+A source-order audit on 2026-10-27 confirms the extension table covers slots
+0 through 278. Run `python3 fb_src/tools/check_extension_api_table_coverage.py`
+to verify it: the checker reports 278 API pointer assignments and one
+intentional null, slot 63 (`global_recover`), which `src/loadext.c` also leaves
+zero because that API was removed. Other null entries are controlled by
+upstream feature guards. The inventory marks the table mapping implemented;
+runtime parity is covered separately by the feature-specific C extension
+probes above.
+
 ## Omitted-feature build checks (2026-10-18)
 
 The generated extension API table also preserves the `loadext.c` guards for
@@ -7430,7 +7680,13 @@ test-profile libraries build successfully, as do `SQLITE_OMIT_DEPRECATED` and
 pointers remain null; the deprecated profile also checks that legacy
 trace/profile slots are null, and the threadless profile checks all five mutex
 slots. The virtual-table-omitted host creates, inserts, and reads an ordinary
-table, and the WAL-omitted host passes the same DDL/DML check. The
+table, and the WAL-omitted host passes the same DDL/DML check. A current
+release-profile WAL-omitted C API smoke also confirms that
+`PRAGMA journal_mode=WAL` reports `delete`, matching an upstream C build with
+the same omission flag. The same probe checks `sqlite3_wal_checkpoint_v2()`
+returns `SQLITE_OK` without changing its frame outputs. The probe is
+`tests/sqlite_omit_wal_api_smoke.c`; the C and FreeBASIC outputs are under
+`fb_src/build/omit-wal-current-20261028/`. The
 OMIT_VIRTUALTABLE build excludes vtab-only C2FB shards and uses neutral
 internal helpers only in that profile. Pager commit, rollback, and filename
 packing now guard WAL state the same way as SQLite.
@@ -7479,6 +7735,179 @@ and Win64. The snprintf output matches the expected strings on each target.
 These file-backed smokes exercise both Windows VFS paths. The full upstream Tcl
 suite has not been run on Windows, and native Windows execution remains
 unverified.
+
+### Windows WAL callback ABI and locking checks (2026-10-27/28)
+
+The file-backed WAL C API smoke in `tests/sqlite_win32_wal_api_smoke.c` passes
+against Win32 SEH and no-SEH DLLs and a Win64 DLL built with `SQLITE_USE_SEH`
+and snapshot support. Under Wine 10 it enables WAL, confirms a second connection
+receives `SQLITE_BUSY` while the first holds the writer lock, verifies that the
+lock can be reacquired after rollback, inserts 100 rows in an immediate
+transaction, and reads `count(*) = 100` and `sum(b) = 15150` through the second
+connection. It then runs a passive checkpoint and closes successfully.
+The host now removes its previous test table and supports native Linux
+execution. The current C source builds to both i686 and x86-64 COFF, passes
+twice in one directory against the current Win32 API-complete DLL under Wine,
+and passes twice against the LLVM FreeBASIC library on Linux. Its fresh Win32
+DLL and database are retained in
+`build/win32-wal-current-source-20261028/`.
+After the Unix FILESTAT/WALSTAT repairs, the same host also passes twice
+against the current GCC-backend `SQLITE_DEBUG`/`SQLITE_TEST` Unix library; the
+recheck artifact is under `build/wal-debug-current-20261028/`.
+
+The separate-process host in
+`tests/sqlite_win32_wal_process_lock_smoke.c` passes against the Win32 SEH and
+no-SEH DLLs and the Win64 SEH DLL. The host uses PID-scoped Windows events and
+a per-run database to wait until a child
+process holds `BEGIN IMMEDIATE`, checks that the parent receives `SQLITE_BUSY`,
+then confirms the parent can acquire the WAL writer lock after the child rolls
+back. While holding the lock, the parent also starts a CRT worker thread that
+opens a separate connection and must receive `SQLITE_BUSY`. Two independent
+smoke runs also pass at the same time on both architectures. The host compiles
+as warning-free C89 for i686 and x64 with `-Wall -Wextra -Werror`. This
+exercises Windows shared-memory lock
+ownership across threads and processes without relying on sleep timing.
+
+This regression check exposed a Win32 callback mismatch. The `winShmMap`
+method had the FreeBASIC default calling convention, which produced a stdcall
+symbol on i686 even though `sqlite3_io_methods.xShmMap` is a CDecl callback.
+Declaring `winShmMap CDecl` fixes stack cleanup when SQLite first maps the WAL
+index. The SEH-enabled DLL and bridge smoke both pass under Wine; the upstream
+Tcl suite on Windows and native Windows execution remain unverified. The
+Win32 DLL was built here using the bundled FBC runtime libraries plus Clang
+and LLD. The Win64 SEH and snapshot profile also builds with the current FBC
+compiler, the locally bundled Win64 FBC runtime, Clang, and LLD. Its DLL passes
+both file-backed WAL hosts under Wine 10; two simultaneous Win64 process-lock
+hosts pass as well. No distro package was required. The full Windows Tcl suite
+and native Windows execution remain unverified.
+
+The repeatable callback audit checks that all 37 Windows VFS function-pointer
+assignments use CDecl in their FreeBASIC types and definitions, and that linked
+Win32/Win64 DLL symbols have no stdcall stack-byte decoration. Run it against a
+previously built DLL with:
+
+```sh
+make -C fb_src check-win-vfs-callback-abi \
+  WIN_VFS_DLL=build/win32-clang-seh-session-20261028/sqlite3-fb-win32-seh-session.dll
+```
+
+The audit passes for the Win32 and Win64 SEH builds recorded above. As a
+negative control, it rejects the earlier Win32 DLL, where the symbol is still
+decorated `_WINSHMMAP@20`.
+
+The Wine page fault reported on 2026-10-28 is reproducible with the older
+`win32-clang-seh-release-20261027` DLL: it attempts to execute an address on
+the stack while the WAL API smoke first maps shared memory. That DLL was built
+at 19:41, before `winShmMap CDecl` was added to the source at 19:57. The same
+unchanged C smoke exits successfully with the newer
+`win32-clang-seh-win32malloc-validate-20261028` DLL when run from a fresh
+directory. Reuse a DLL built after the callback fix; the old release artifact
+is a known-bad negative control. A fresh recheck also reproduced the page fault
+with the old release DLL and passed with the newer API-complete Win32 DLL.
+
+The WAL host now drops and recreates its table before each run and has a native
+Linux `main()` entrypoint. The same source passes twice in one directory
+against the LLVM-built FreeBASIC library, and passes against the native C
+reference.
+
+The updated Windows helper compiles to i686 and x86-64 COFF with FBC 1.20.5;
+the objects import `InterlockedCompareExchange` with the target ABI. A fresh
+Win32 release build now succeeds with the installed i686 MinGW toolchain and a
+source-tree FreeBASIC Win32 runtime containing the long-double helpers used by
+FTS3. MinGW `ld.bfd` left Clang's `.sxdata` section at RVA 0, which caused Wine
+to reject the DLL as an invalid PE image. The Win32 `SQLITE_USE_SEH` Makefile
+path now removes that orphan section after linking. The new
+`make check-wal-seh-bridge-win32-wine` target raises an in-page exception,
+checks its metadata and the handled-exception callback, and passes under Wine
+after the same cleanup. The rebuilt DLL in
+`build/win32-release-current-20261028-poststrip/` also passes
+`sqlite_win32_wal_api_smoke.exe` twice from a fresh directory.
+After the i686 MinGW packages were installed, a fresh C89 smoke executable
+was cross-compiled in `build/mingw-package-wal-recheck-20261028/` and passed
+twice under Wine against the API-complete Win32 DLL.
+A separate minimal `CLongDouble` link check showed that the installed FBC
+runtime archive predates `longdouble_ops.c`: its link fails with an undefined
+`fb_LongDoubleToNative`. An isolated source-tree build of `libfbmt.a` includes
+the symbol, and the same program links against it and prints `1.250000`.
+This is an out-of-date installed runtime archive, not a reproduced compiler
+bug; no FBC sources were changed.
+The C host `tests/sqlite_windows_wal_seh_fault_smoke.c` exercises upstream WAL
+fault point 650 through a real read. It observes
+`SQLITE_IOERR_IN_PAGE`, disables injection, and retries the read successfully
+on the same connection. `make check-win32-wal-seh-fault-wine` passes twice
+under Wine against release and `SQLITE_DEBUG`/`SQLITE_TEST` DLLs.
+`make check-win64-wal-seh-fault-wine` passes twice against the API-complete
+DLL. The Win32 debug run also exercises WAL lock-mask and try-state assertions
+during exception cleanup.
+
+### Windows Session C API check (2026-10-28)
+
+Win32 and Win64 SEH profiles build with `SQLITE_ENABLE_SESSION` and
+`SQLITE_ENABLE_PREUPDATE_HOOK`. The unchanged upstream `test/c/changeblob1.c`
+compiles as i686 and x64 C hosts and passes under Wine 10 against both DLLs.
+Its exit code confirms that `sqlite3changegroup_change_blob()` rejects a 2 GiB
+blob change with `SQLITE_NOMEM`. The upstream test source remains unchanged;
+the harness supplies a PE entry point and local CRT declarations.
+
+### Windows and Linux FTS5 C API smoke (2026-10-28)
+
+Win32 and Win64 SEH/snapshot DLLs with `SQLITE_ENABLE_FTS5` build through the
+normal `fb_src` Makefile. The C host in `tests/sqlite_windows_fts5_smoke.c`
+passes under Wine 10 on both architectures after creating an FTS5 table,
+inserting rows, closing and reopening the database, and verifying boolean,
+phrase, and prefix `MATCH` results. The upstream FTS5 Tcl suite has not been
+run against the Windows DLLs. The same C host now also builds with a native
+`main()` entrypoint and passes against the FTS5-enabled LLVM shared library.
+
+### Windows R-Tree and GeoPoly C API smoke (2026-10-28)
+
+Win32 and Win64 SEH/snapshot DLLs with `SQLITE_ENABLE_RTREE` and
+`SQLITE_ENABLE_GEOPOLY` build through the normal `fb_src` Makefile. The C host
+in `tests/sqlite_windows_spatial_smoke.c` passes under Wine 10 on both targets:
+it writes R-Tree rectangles and GeoPoly polygons, closes and reopens the
+database, then checks rectangle overlap, polygon overlap, and polygon area. The
+GeoPoly square uses counter-clockwise vertex order because `geopoly_area()` is
+signed by polygon winding. The upstream R-Tree test suite remains unchanged and
+has not been run against these Windows DLLs.
+
+### Combined Windows extension integration (2026-10-28)
+
+Win32 and Win64 SEH/snapshot DLLs build with FTS3/4/5, Session/Preupdate,
+R-Tree, and GeoPoly enabled together. Six C API hosts pass against each DLL
+under Wine 10: WAL writes and checkpoint, process/thread writer-lock
+contention, FTS3/4 MATCH queries, FTS5 MATCH queries, R-Tree/GeoPoly queries,
+and the unchanged Session `test/c/changeblob1.c` OOM case. These focused hosts
+check extension integration; they do not replace the Windows Tcl suite.
+
+The API-complete Win32 and Win64 SEH profiles also enable CARRAY, column
+metadata, normalized SQL, statement scan status, and unlock notifications. The
+public export audit reports 305 of 306 declared APIs on both targets; the only
+omission is optional CEROD. Nine C API hosts pass against each DLL under Wine
+10: WAL writes and checkpoint, process/thread writer-lock contention, FTS3/4
+MATCH, FTS5 MATCH, R-Tree/GeoPoly, WITHOUT ROWID storage, the unchanged Session
+OOM test, optional APIs, and `sqlite3_config()` varargs. The WITHOUT ROWID host in
+`tests/sqlite_windows_without_rowid_smoke.c` persists composite-key parent and
+child tables, checks foreign-key rejection and secondary-index lookup, then
+runs VACUUM, integrity_check, and reopen checks. The optional API host in
+`tests/sqlite_windows_optional_api_smoke.c` binds an integer array to `carray()`,
+checks origin metadata and normalized SQL, reads a scan loop count, then
+exercises a shared-cache lock conflict, unlock callback, and successful retry.
+The `tests/sqlite_windows_config_smoke.c` host checks pre-init config varargs,
+PCACHE2 retrieval, in-memory DDL, page-cache header size after initialization,
+the post-init misuse guard, and log callback context. All three added hosts compile
+cleanly as C89 with warnings treated as errors for i686 and x64.
+
+Separate `SQLITE_WIN32_MALLOC` SEH profiles build on Win32 and Win64. In those
+profiles, the config host sets `SQLITE_CONFIG_WIN32_HEAPSIZE`, initializes the
+HeapCreate-backed allocator, and runs in-memory DDL; the WAL API and
+process/thread writer-lock hosts also pass under Wine. Both profiles pass the
+Windows VFS callback ABI audit. Results are in the corresponding
+`win32-clang-seh-win32malloc-20261028/` and
+`win64-clang-seh-win32malloc-20261028/` build directories.
+An additional Win32 `SQLITE_DEBUG` plus `SQLITE_WIN32_MALLOC_VALIDATE` profile
+passes the same config/DDL, file-backed WAL, and process/thread lock hosts;
+HeapValidate checks and the 37-callback VFS ABI audit pass as well. Its results
+are under `fb_src/build/win32-clang-seh-win32malloc-validate-20261028/`.
 
 The Windows symbol audit found that `sqlite3_win32_set_directory8()` had a
 FreeBASIC body but lacked the `Export` attribute. It is now exported alongside
@@ -7864,7 +8293,10 @@ earlier DSO, before the focused fixes above.
 The ICU-enabled profile exercises the conditional ICU path in `e_fts3.test`
 and replaces the built-in LIKE function. The e_fts3 script creates an ICU
 `names` table but later checks that the schema is empty after dropping only the
-non-ICU tables. Its `sqllimits1` pattern-length assertion targets the built-in
+non-ICU tables. A minimal replay using the exact-profile C and FreeBASIC
+fixtures returns the same `sqlite_master` rows for `names` and its FTS shadow
+tables. The feature-matched C fixture also reproduces the exact
+`e_fts3-1.1.7.6` result. Its `sqllimits1` pattern-length assertion targets the built-in
 LIKE function; the test's own comment notes that replacement functions bypass
 this runtime limit. The matched native C ICU fixture reproduces the four
 `e_fts3.test` errors and the `sqllimits1-15.2` failure. The no-ICU C reference
@@ -8539,11 +8971,22 @@ covered by the active FreeBASIC serial-type implementation.
 The default library build and a compile with `SQLITE_TEST`, `SQLITE_DEBUG`,
 `SQLITE_VDBE_COVERAGE`, and `SQLITE_ENABLE_MEMSYS5` both succeed. The separate
 `SQLITE3_FB_COMPILE_DISABLED_BODIES` compile also succeeds. The repeatable
+combined compile with all five defines succeeds as well, with
+`SQLITE_STRICT_SUBTYPE=1` set for the port's option guard; its output is
+`fb_src/build/libsqlite3-fb-body-coverage.so`. The repeatable
 source audit `python3 fb_src/tools/check_function_body_coverage.py` matches
 every indexed C name to a FreeBASIC `Function` or `Sub` definition, or to its C
 ABI `Alias`, across the `.bas` and included `.bi` source units: 3,263 matched,
 zero unmatched. `make -C fb_src -j2` succeeds. This establishes 100% coverage
 of indexed function bodies; runtime parity remains a separate measure.
+
+Rechecked on 2026-10-27 with `make -C fb_src audit-function-bodies`: the core
+source audit reports 3,263 matched and zero unmatched, and the full debug/test library
+links with `SQLITE3_FB_COMPILE_DISABLED_BODIES` enabled at
+`fb_src/build/function-body-audit/libsqlite3-fb-body-audit.so`. No additional
+core function-body rows remain; this verifies definition presence and
+compilation, not semantic parity. Selected extension definitions are tracked
+separately as described above.
 
 
 ## Initialization allocator probe and builtin registration (2026-10-21)
@@ -8706,6 +9149,14 @@ dynamic symbol table. The all-feature Linux library at
 omissions are explicitly allowed; the separate Windows export audit covers
 the Windows-only API.
 
+## PE public API export verification (2026-10-27)
+
+`check_public_api_exports.py` now detects PE DLLs and reads their export tables
+with `objdump -p`, while retaining `nm -D` for ELF libraries. The all-feature
+production Win32 and Win64 DLLs each export 305/306 declared SQLite APIs; the
+only absent name is the optional `sqlite3_activate_cerod`. Both DLL checks pass
+without allowing any Windows API omissions.
+
 
 ## Scan-status handling after persistent OOM (2026-10-21)
 
@@ -8805,11 +9256,877 @@ and log remain in `fb_src/build/full-udl-fb-next12-clean-20261021/`; it had
 three capi2 origin-name failures (fixed and retested above) and four C-shared
 ICU-tokenizer expectation mismatches in `e_fts3.test`.
 
-The corrected full-feature library and Tcl fixture are built in
-`fb_src/build/full-udl-fb-next13/`. The unchanged metadata-enabled
-`capi2.test` passes 145/145 with no tracked leaks. The nested-query OOM portion
-of `wherefault.test`, selected with `--match=wherefault-3*`, passes 201,400
-runner invocations with no leaks. A clean next13 full suite is now running in
-`fb_src/build/full-udl-fb-next13-clean-20261021/` with
-`testfixture_fb_compat_next13`; its initial snapshot had six completed jobs,
-1,506 ready jobs, four running workers, and no failures.
+The next13 profile build reported 62 compile options. Comparison with next12
+found that it omitted `ENABLE_EXPLAIN_COMMENTS`, so its full-suite attempt was
+stopped after 33 clean jobs and its log/database were retained.
+
+The next14 full-feature library and Tcl fixture match the next12 runtime
+profile's 63 compile-option values. The unchanged metadata-enabled `capi2.test`
+passes 145/145 with no tracked leaks. The clean next14 full suite completed all
+1,516 jobs in
+`fb_src/build/full-udl-fb-next14-clean-20261021/` at 2026-10-21 22:31 UTC:
+1,512 jobs had zero errors, and four jobs recorded seven errors across
+1,951,145 invocations. `test/e_fts3.test` accounts for four errors;
+`test/sqllimits1.test` and `ext/fts5/test/fts5bigtok2.test` account for one
+each. All three failure signatures also appear with the matched native C ICU
+fixture in `fb_src/build/c-reference-icu-nosync/`; its targeted logs are in
+`target-e_fts3/`, `target-sqllimits1/`, and `target-fts5bigtok2/`. The fourth
+failed job was `test/ctime.test`, run with a DSO built before the compile-option
+ordering fix. The rebuilt matched profile reports the same 63 options in
+sorted order and passes the unchanged `ctime.test` 92/92 with no tracked
+leaks; its fresh log is
+`fb_src/build/full-udl-fb-next14-ctimefix/rerun-current/ctime-next14-rerun.log`.
+The compact-profile
+`wherefault-3*` OOM subset passes 201,400 invocations with no leaks; the full
+next14 suite also completed its `wherefault.test` job without errors.
+
+## FTS5 debug assertions (2026-10-21)
+
+`fts5IndexTombstoneRebuild()` now checks the upstream single-page input and
+minimum output-slot invariants under `SQLITE_DEBUG`; `fts5IndexTombstoneAdd()`
+checks error propagation and that failed rebuilds return no hash output. The
+rebuild retry loop also checks that it retries only while the index remains
+error-free. The debug integrity path now runs `fts5TestDlidxReverse()`, which
+compares forward and reverse doclist-index checksums and checks page bounds.
+`fts5SegiterPoslist()` checks its input and buffer pointers and verifies that
+the grown buffer holds the position list plus all eight zero-padding bytes
+before `memset`. These additions bring the module to 87 restored debug
+assertion checks. The full-feature debug library and isolated Tcl fixture build
+successfully with `SQLITE_TEST`,
+`SQLITE_DEBUG`, and `SQLITE_FTS5_DEBUG`. The unchanged upstream
+`fts5contentless4.test` passes 1,133/1,133, including its 5,000-row tombstone
+rebuild path; `fts5rowid.test` passes 30/30; `fts5simple.test` passes 86/86;
+`fts5fault1.test` passes 44,519/44,519; and `fts5integrity.test` passes 67/67.
+All five runs report no errors or tracked allocation leaks. The latest
+`fts5contentless4.test` log is
+`fb_src/build/fts5-index-assert-fullprofile/run3/fts5contentless4-current.log`;
+the latest `fts5fault1.test` log is
+`fb_src/build/fts5-index-assert-fullprofile/run4/fts5fault1-current.log`;
+the latest `fts5integrity.test` log is
+`fb_src/build/fts5-index-assert-fullprofile/run5/fts5integrity-current.log`;
+other build artifacts are under `fb_src/build/fts5-index-assert-fullprofile/`.
+
+## Threadless no-op mutex callbacks (2026-10-21)
+
+The C API host `fb_src/tests/sqlite_mutex_threadless_api.c` checks fast,
+recursive, static, and NULL mutexes in both `THREADSAFE=0` release and debug
+profiles. Its state-transition output matches C references built with
+`SQLITE_MUTEX_NOOP` both with and without `SQLITE_DEBUG`: allocation,
+held/not-held, enter/leave, try, recursive depth, and cleanup. In the debug
+profile the host also exhausts the configured memsys5 heap, confirms fast
+mutex allocation fails, frees the blocks, and confirms allocation recovers.
+The public `sqlite3_threadsafe()` value is checked separately for each profile.
+Build artifacts and captured output are under
+`fb_src/build/threadsafe0-full-debug/`.
+
+
+## Apple proxy auto-selection (2026-10-21)
+
+On Apple, locking style defaults to enabled as in `src/os_unix.c`; the
+filesystem probe and FAT inode workaround remain active if the style is
+explicitly disabled. The Unix VFS follows upstream's automatic proxy-lock
+policy when that style is enabled. It checks `SQLITE_OPEN_AUTOPROXY` and
+`SQLITE_PREFER_PROXY_LOCKING`, uses Darwin `fstatfs()` and `MNT_LOCAL` to
+identify network filesystems, and honors the `SQLITE_FORCE_PROXY_LOCKING`
+environment override. The initialized main database file is routed through the
+ported proxy conch and proxy I/O methods when policy selects it. The Apple
+filesystem flags also preserve SQLite's empty-file inode workaround for FAT
+volumes by writing the first database-header byte before using the inode as a
+lock key.
+
+The default threaded library builds. A Linux `SQLITE_ENABLE_LOCKING_STYLE=1`
+C API smoke passes the exclusive-lock check on both `unix-flock` and
+`unix-dotfile`; captured outputs are in
+`fb_src/build/unix-lockstyle-proxy-audit/`. Apple-guarded objects compile with
+the platform default, with `SQLITE_ENABLE_LOCKING_STYLE=0`, with
+`SQLITE_PREFER_PROXY_LOCKING`, and with `SQLITE_TEST` plus
+`HAVE_GETHOSTUUID=1`. Apple's [`sys/mount.h`](https://github.com/apple/darwin-xnu/blob/main/bsd/sys/mount.h)
+defines `MNT_LOCAL` as `0x00001000`. Native Apple filesystem and
+multi-process proxy-lock behavior remain unverified on this Linux host. A
+Linux simulation using the Darwin `statfs` record exercises remote/local
+selection, forced-off and forced-on overrides, the proxy lock conflict path,
+and the FAT empty-file seed write. All five locking-style cases match the
+upstream C reference built from the unchanged amalgamation. A second
+Apple-profile build with `SQLITE_ENABLE_LOCKING_STYLE=0` also matches the C
+reference on the empty FAT-file case with proxy selection disabled. The
+repeatable runner and individual logs are under
+`fb_src/tests/run_apple_proxy_policy_sim.sh` and
+`fb_src/build/apple-proxy-simulation/`.
+
+
+## WAL checkpoint C API coverage (2026-10-21)
+
+The next14 full-suite database records `test/e_walckpt.test` passing 348/348
+and `test/wal5.test` passing 413/413 through `testfixture_fb_compat_next14`.
+The unchanged `test1.c` Tcl helpers call the FreeBASIC
+`sqlite3_wal_checkpoint_v2()` and legacy `sqlite3_wal_checkpoint()` exports.
+The tests cover PASSIVE, FULL, RESTART, TRUNCATE, NOOP, attached databases,
+busy readers and writers, frame counts, and connection error state. Both jobs
+finish with no tracked SQLite allocations. Their captured output is in
+`fb_src/build/full-udl-fb-next14-clean-20261021/testrunner.db` and
+`testrunner.log`. Fresh isolated reruns also pass 348/348 and 413/413 with no
+tracked leaks; their logs are under
+`fb_src/build/checkpoint-api-current/`.
+
+
+## Collation-needed REINDEX and sorter error state (2026-10-27)
+
+New `UnpackedRecord` allocations initialize the comparator error byte to
+`SQLITE_OK`. `sqlite3VdbeRecordUnpack()` leaves that byte alone after unpacking,
+so a later `SQLITE_NOMEM` or corruption error from a record comparison remains
+sticky until the record is discarded. Resetting the byte on every unpack
+allowed `reindex.test` to pass but broke transient sorter OOM handling; the
+allocation-only initialization now passes both paths.
+
+The standalone C API probe matches the native C reference for the collation-
+needed callback count, comparison count, REINDEX result, and row order on both
+native and GCC-backend FreeBASIC. In matched `SQLITE_DEBUG`/`SQLITE_TEST`
+feature profiles, unchanged `reindex.test` passes 34/34 and unchanged
+`sortfault.test` passes 38,297/38,297 on both backends. The related unchanged
+`sort.test`, `sort2.test`, `sort3.test`, `sort4.test`, `sort5.test`, and
+`sorterref.test` scripts pass 149/149 on the native backend. All eight native
+Tcl runs and both GCC regression scripts finish with no tracked SQLite
+allocations. Native logs and probes are in
+`fb_src/build/reindex-fix3-fullprofile-20261027/`; GCC logs are in
+`fb_src/build/reindex-gcc-fullprofile-20261027/`.
+
+The changed record-comparison module also passes FreeBASIC target C generation
+for Win32 and Win64. Clang compiled those generated translation units into
+i386 and x86-64 COFF objects. This checks target-specific code generation and
+layout for that module; it does not link a Windows SQLite DLL or execute the
+Windows runtime path.
+
+On this host, the default `RLIMIT_NOFILE` is 524,288. `misc7.test` exhausts
+that limit by opening files until the operating system rejects another open;
+at the default limit this single script exceeded two hours in the full-suite
+run. With `ulimit -n 8192`, the unchanged script passes 1,318/1,318 in 3.9
+seconds with no tracked leaks. The fresh full-suite rerun uses that limit.
+
+
+## Full UDL/ICU suite after saved-state resume (2026-10-27)
+
+After a reboot, `test/testrunner.tcl retest` resumed the saved database and kept
+the 471 previously completed jobs. The corrected debug/test FreeBASIC fixture
+completed all 1,516 jobs across 1,981,504 invocations. It recorded six errors
+in three jobs: four in `e_fts3.test`, one in `fts5bigtok2.test`, and one in
+`sqllimits1.test`. The three failure signatures match the saved native C
+reference runs in `fb_src/build/c-reference-icu-nosync/`; the seeded
+`e_fts3.test` allocation-failure indices differ, but the error class and
+schema-introspection result match. No port-specific failure remains in this
+full-suite run. The database, logs, pre-resume snapshot, and job outputs are
+under `fb_src/build/full-suite-udl-fix3-nofile8192-20261027/`.
+
+## Public API export recheck (2026-10-28)
+
+The current all-feature Linux library exports 302/306 declarations with only
+CEROD and Windows directory APIs absent for that profile. Current production
+Win32 and Win64 DLLs export 305/306 each, with only optional CEROD absent. All
+three explicit `check_public_api_exports.py` runs pass with those omissions
+listed; captured commands and outputs are under
+`fb_src/build/api-audit-current-20261028/`.
+
+## GCC-backend full-suite verification (2026-10-28)
+
+The completed GCC-backend FreeBASIC full-feature UDL/ICU debug/test run used
+the unchanged upstream Tcl suite and test-support code. It completed all
+1,516 jobs with 1,513 clean jobs and the same six errors in three jobs as the
+native FreeBASIC run: `e_fts3.test` (four), `fts5bigtok2.test` (one), and
+`sqllimits1.test` (one). A normalized job-by-job comparison found identical
+job names, completion states, and error counts across all 1,516 jobs. These
+three failure categories also appeared in targeted native C reference runs.
+The seeded `e_fts3` allocation-failure indices vary, but its OOM error class
+and schema-introspection difference match the C reference.
+
+The GCC run recorded 1,981,727 invocations versus 1,981,504 natively. The
+18 invocation-count differences are in randomized, resource-dependent, and
+fault-injection tests; the per-test totals are recorded in
+`fb_src/build/full-suite-gcc-20261028/comparison-summary.log`. The suite
+database and runner log are in `fb_src/build/full-suite-gcc-20261028/`.
+
+
+## FTS5 debug invariant audit (2026-10-28)
+
+All nine active debug-only helpers found by the extension source audit now
+have FreeBASIC bodies. Transaction state and savepoints are checked at each
+virtual-table callback. Expression-tree heights are checked after parsing.
+The index port now checks iterator winner selection, comparison-tree state,
+term ordering, and integrity-query checksums. The `assert_nc` term-order
+check honors the upstream `sqlite3_fts5_may_be_corrupt` flag.
+
+The all-feature `SQLITE_DEBUG`/`SQLITE_TEST` library builds with both FreeBASIC
+backends. On both, unchanged `fts5savepoint.test`, `fts5integrity.test`,
+`fts5expr.test`, and `fts5query.test` pass 7/7, 67/67, 304/304, and 778/778
+respectively with no tracked leaks. `fts5bigtok2.test` has the same OOM
+expectation mismatch as the native C reference and frees all tracked
+allocations. The latest full 148-job `fts5%` run completed 147 jobs and
+264,733 Tcl cases; its only error was that same `fts5bigtok2.test` mismatch.
+Full details are in
+`fb_src/build/fts5-debug-complete-audit/verification.log`.
+
+
+## Core C source inventory audit (2026-10-28)
+
+`make -C fb_src audit-core-source-inventory` checks each top-level
+`src/*.c` file against the source inventory and function index. It accounts for
+all 125 files: 79 implementation files with indexed bodies, data-only
+`src/global.c`, and 45 test-support or Tcl-adapter files left upstream in C.
+No source file is unclassified. The full `audit-function-bodies` target now
+runs this audit before checking all 3,263 function rows and compiling the
+debug/test library with upstream-disabled bodies exposed. It passes on the
+2026-10-28 source state.
+
+
+## Unix file and WAL diagnostics parity (2026-10-28)
+
+The unchanged C `testfixture` and the current FreeBASIC debug/test library now
+produce byte-identical output for `sqlite_filestat()` and `sqlite_walstat()`
+before and after switching a file-backed database to WAL. The comparison also
+opens a second connection and matches its shared-memory ID and lock state.
+`tests/sqlite_file_diag_api_smoke.c` is the reusable FreeBASIC C API probe; the
+reference Tcl script and both outputs are under
+`fb_src/build/diag-current-20261028/`.
+
+A separate non-debug library built with both explicit diagnostic feature flags
+also matches a C amalgamation built with the same flags, including the
+zero-valued shared-memory IDs used outside `SQLITE_DEBUG`. Its output and C
+reference object are under `fb_src/build/diag-release-current-20261028/`.
+
+The differential check exposed and fixed three port gaps: the `/proc` reader
+used the element size instead of the fixed buffer size, string indexing in the
+lock-line matcher converted text instead of comparing bytes, and the lock
+offset parser rejected the trailing newline accepted by C `strtoll()`. It also
+exposed that `sqlite3PagerJrnlFile()` returned the rollback-journal handle in
+WAL mode and the shared-memory diagnostic omitted its per-connection ID.
+Linux diagnostic behavior matches C in both debug and explicit-feature
+profiles. Windows SEH behavior for these callbacks remains unverified.
+
+
+## Windows and Unix follow-up (2026-10-28)
+
+The installed i686 MinGW toolchain builds and runs
+`make -C fb_src check-wal-seh-bridge-win32-wine` under Wine. The current
+Win32 WAL API smoke also exits successfully with the post-strip release DLL
+from `build/win32-release-current-20261028-poststrip/` in a fresh directory.
+The earlier 10:33 release DLL did not pass this repeat run; keep using the
+post-strip artifact for the reported Windows result.
+
+The reduced FreeBASIC compiler regression for nested by-value `Cva_List`
+forwarding and `Cva_Copy` passes with the rebuilt compiler on both LLVM and
+GCC backends.
+The SQLite LLVM-linked Tcl fixture also opens an in-memory database, runs
+`SELECT 1`, and closes it without the former `sqlite3_open_v2` crash.
+
+The Unix VFS tracks the debug transaction-counter fields, performs the
+benign header read, and handles `SQLITE_FCNTL_DB_UNCHANGED` using the signed C
+integer type. A seeded `ioerr2-3.0.80` reproduction exposed an extra assertion
+in the generic POSIX unlock path. Upstream applies this transaction-counter
+assertion only in the Apple AFP unlock implementation; generic POSIX unlock
+does not assert or clear `inNormalWrite`. The extra generic block has been
+removed while the AFP check remains.
+
+The C fixture passes seeded `ioerr2.test` (2,635 cases, zero errors, no
+leaks). The corrected all-feature FreeBASIC GCC debug library passes the
+isolated persistent-error case `ioerr2-3.1.80` (8/8 checks) and the full
+seeded file (2,602 tests, zero errors, no leaks). At the injected I/O point,
+C reads page 45 while FreeBASIC spills page 15 while fetching page 24; the
+fault path now completes without the non-upstream generic unlock assertion.
+The source build log, isolated test, full log, input database, paired traces,
+and diagnostic run are in `fb_src/build/ioerr2-debug-parity-20261028/`.
+
+
+## Debug-capability fixture and Win32 recheck (2026-10-29)
+
+The FreeBASIC Tcl fixture had `sqlite_options(debug)=0` while its linked
+library reported `SQLITE_DEBUG` as enabled. The separate C test adapter was
+compiled without `SQLITE_DEBUG`, which caused debug-gated branches to be
+skipped even though the FreeBASIC engine itself was a debug build. A separate
+adapter built with `-DSQLITE_DEBUG=1` reports the capability correctly. With
+it, unchanged `autoanalyze1.test`, `badutf2.test`, and `pragma.test` pass on
+both the FreeBASIC library and matched C reference: 18/18, 50/50, and 236/236
+tests, respectively, with no tracked leaks. `bigsort.test` exits through its
+upstream debug-build guard on both. The fixture and isolated run outputs are under
+`fb_src/build/testfixture-reindex-gcc-debugcaps-20261028/` and
+`fb_src/build/debugcaps-paired-tests-20261029/`.
+
+The 2026-10-29 source audit still finds all 3,263 core rows and all 1,339
+active selected-extension rows matched to FreeBASIC bodies, with no missing
+in-scope rows. The other 15 extension rows remain explicitly classified by
+their upstream status. The top-level source inventory classifies all 125 C
+files, and the public extension API table has 278 assignments, its one
+intentional null, and no unexpected gaps.
+
+On 2026-10-29, `make -C fb_src check-wal-seh-bridge-win32-wine` rebuilt and
+passed the i686 SEH callback smoke using the installed MinGW packages. The
+Win32 WAL API smoke also passed twice from a fresh directory against the
+API-complete DLL built after the `winShmMap CDecl` fix. Its recheck artifacts
+are under `fb_src/build/mingw-package-wal-recheck-20261029/`.
+
+At 2026-10-29 04:34 UTC, the FreeBASIC retest had completed 865 of 1,516
+jobs; `fts3corrupt4.test` and `e_fts3.test` were the two failing jobs. Its
+matched C reference had completed 351 jobs, with `e_fts3.test` as its only
+failing job. Of 352 jobs completed by both runners, `fts3corrupt4.test` was
+the only different result. This test calls `reset_prng_state`, which reseeds
+from VFS entropy rather than fixing a reproducible seed. An isolated unseeded
+rerun passed on both engines. To compare deterministic inputs, temporary
+copies of the unchanged test inserted `prng_seed 1002` and `prng_seed 1005`
+after the reset: both engines produced the same expected malformed-image
+result in case 25.4 for seed 1002 and case 25.5 for seed 1005. These checks
+indicate the full-suite difference is random input, not a FreeBASIC/C behavior
+mismatch. The seeded test copies and their run directories are under
+`fb_src/build/fts3corrupt4-seeded-20261029/`. Both full runners remain active.
+Their databases and logs are under
+`fb_src/build/full-suite-gcc-unlockfix-20261028/` and
+`fb_src/build/full-suite-c-reference-matched-20261028/`; query each
+`testrunner.db` for advancing state.
+
+At 2026-10-29 05:04 UTC, the FreeBASIC retest's `walcrash3.test` completed
+20,997/20,997 cases with zero errors and no tracked leaks. It ran for about
+2 hours 12 minutes in the concurrent retest; the earlier GCC suite completed
+the same test in about 33 minutes. The matched C retest has not reached this
+job yet. At 05:05 UTC, the current job counts were 911 complete and 2 failed
+for FreeBASIC, and 415 complete and 1 failed for C; both runners remain active.
+
+The later FreeBASIC retest also recorded one error in `sqllimits1-15.2`: the
+test expected the built-in LIKE pattern-length error but received a successful
+match. The targeted matched C fixture reproduces the same case and result.
+Both all-feature profiles enable ICU, whose `ext/icu/icu.c` registers its own
+`like()` implementation; the test itself documents that an external LIKE
+implementation bypasses the built-in pattern-length limit. This result is a
+shared ICU-profile behavior, not a FreeBASIC/C mismatch. The C full-suite run
+has not reached `sqllimits1.test` yet.
+
+The same retest recorded `fts5bigtok2-1.1` expecting an out-of-memory result
+for its 1.08 GB token, but the FreeBASIC fixture completed the insert. A
+targeted run of this unchanged three-case test against the matched C fixture
+returned the same successful insert, with no tracked leaks. This is another
+shared test/profile result rather than a FreeBASIC-only divergence; the full C
+runner has not reached this job yet.
+
+The C2FB `make test` target now passes the integrated SQLite source root and
+accepts an optional `FBC_SOURCE_DIR`. The first run's C2FB regression checks
+reached the compiler tests but failed to link against the installed FBC runtime,
+which predates `fb_LongDoubleToNative`. The existing reduced
+`longdouble_abi.bas` reproducer compiles and runs with
+`/home/jkfirth/fbc/bin/fbc -prefix /home/jkfirth/fbc`, prints `1.250000`, and
+confirms the source-tree compiler/runtime pair provides the helper without an
+FBC source change. A complete rerun of `make -C fb_tools/c2fb test` against this
+matching compiler/runtime pair is still in progress.
+
+At 2026-10-29 08:12 UTC, the FreeBASIC runner had completed 1,104 jobs
+(1,100 passed, 4 failed); the matched C runner had completed 1,098 (1,095
+passed, 3 failed). Among the 1,098 jobs completed by both, only
+`fts3corrupt4.test` differs: its unseeded FreeBASIC run reported two errors,
+while C passed. The seeded paired runs above remain the deterministic evidence
+for this entropy-sensitive case.
+
+Both full `e_fts3.test` runs report four errors, but the test's expected-empty
+schema check is inconsistent with its setup: under `ifcapable icu`, test
+1.1.6.1 creates the `names` FTS3 table, then the cleanup at 1.1.7 drops the
+other tables but not `names`, before 1.1.7.6 expects an empty `sqlite_master`.
+Both engines return that same `names` schema. The three OOM failure indices
+differ (C: 72/91; FreeBASIC: 83/102), but the observed leftover schema is the
+same. This is a shared test/profile failure, not a demonstrated SQL-result
+divergence.
+
+The matched C runner has also now completed
+`sqllimits1.test`: both engines report the same single failure in
+`sqllimits1-15.2`, where the ICU `like()` override accepts a long pattern
+instead of returning the built-in pattern-limit error. This is the expected
+shared profile behavior. The matched C `fts5bigtok2.test` has now completed
+with the same single error as FreeBASIC: expected out-of-memory, got success
+for the large-token insert. The earlier targeted C run observed the same
+successful insert. The tracked C2FB rerun has passed all four archive-overlay
+tests and started `test_c2fb.py` with both source directories supplied. It has
+passed the expression, candidate-growth, catalog-field-growth, large-record
+index, candidate-limit, and typedef-binding checks. Its current strict
+macro-value audit completed all three full profile passes, followed by the
+record-layout audit. The regression runner completed
+`translate-preprocessed-tree`; the `packed_flags.c` body fixture produced a
+GCC shared-library artifact and its C2FB source-unit checks are advancing into
+FTS5 pointer subscripts. The final result is pending.
+At this snapshot, the host exposed 6 CPUs to the test processes and reported a
+load average near 63, so the remaining suite times are sensitive to shared
+machine load.
+
+The current Win32 API-complete DLL in
+`fb_src/build/mingw-package-wal-recheck-20261029/` exports 305 of 306 declared
+public APIs, with only optional CEROD absent. The current Linux debug/testfixture
+library in `fb_src/build/ioerr2-gcc-debug-generic-unlock-fix-allfeatures-20261028/`
+exports all 296 APIs required by its profile; the ten explicit omissions are
+CEROD, three Windows directory APIs, `sqlite3_normalized_sql` (normalization is
+optional), and the five snapshot APIs (`SQLITE_ENABLE_SNAPSHOT` is optional).
+
+## C2FB source-unit regression follow-up (2026-10-29)
+
+The previous tracked `make -C fb_tools/c2fb test` run reached
+`check_generic_body_source_unit_rejects_incomplete_record_layout` and failed
+because the fixture expected two translations and two skips. Its union was
+fully defined and translated to a FreeBASIC union; a reduced C/FBC layout probe
+reported 64-byte union size and 16-byte containing-field offset for C and for
+both native and GCC FBC backends. The test now uses a genuinely omitted packed
+record for the incomplete-local-layout rejection, while checking translation
+of the complete union. The targeted source-unit check passes. The tracked C2FB
+rerun rebuilt the converter and passed all four archive-overlay tests; the main
+Python regression script is running `body-candidate-growth`.
+
+At 2026-10-29 08:30 UTC, the FreeBASIC full-suite runner had completed 1,149
+jobs (1,145 passed, 4 failed); the matched C runner had completed 1,229
+(1,226 passed, 3 failed). Of the 1,135 jobs completed by both, only
+`fts3corrupt4.test` differs in state/error count.
+
+## Win32 smoke and thread004 fixture follow-up (2026-10-29)
+
+After the i686 MinGW packages were installed, `make -C fb_src
+check-wal-seh-bridge-win32-wine` was rerun successfully. The current
+API-complete Win32 DLL in `build/mingw-package-wal-recheck-20261029/` also
+passes `sqlite_win32_wal_api_smoke.exe` under Wine. The reported execute fault
+matches the known-bad pre-`winShmMap CDecl` release DLL; keep using a DLL built
+after that callback-convention fix.
+
+The full FreeBASIC `thread004.test` run segfaulted once, with the core showing
+`sqlite3_table_column_metadata()` called with a null database pointer. The
+upstream C test support converts pointer strings through a shared Tcl hash and
+guards that hash with `Tcl_MutexLock`/`Tcl_MutexUnlock`. The original fixture
+build did not define `TCL_THREADS`, so those Tcl macros compiled to no-ops
+although the installed Tcl library is threaded. A separate fixture built with
+`--c-define TCL_THREADS=1` imports both Tcl mutex functions and passes the
+unchanged test eight times against the same FreeBASIC library; the matched C
+fixture passed 15 direct repetitions. This points to a test-fixture build race,
+not a confirmed SQLite engine defect. No FreeBASIC engine change was made.
+
+At 2026-10-29 09:25 UTC, the live FreeBASIC runner had 1,325 completed jobs,
+5 failed jobs, 4 running jobs, and 182 ready jobs. The C reference had 1,511
+completed, 3 failed, and 2 running. Both still report the same three failures
+in `fts5bigtok2.test`, `e_fts3.test`, and `sqllimits1.test`; the FreeBASIC-only
+results are `fts3corrupt4.test` and the single `thread004.test` run described
+above. The tracked C2FB regression rerun remains active after the corrected
+record-layout fixture change.
+
+At 2026-10-29 09:38 UTC, the matched C full-suite runner had completed all
+1,516 jobs: 1,513 passed and the three shared profile failures remained. The
+FreeBASIC runner had 1,352 passed, 5 failed, 4 running, and 155 ready. A clean
+converter rebuild now passes the focused anonymous-union initializer check on
+both native and GCC FreeBASIC backends. The new full C2FB regression rerun has
+passed its four archive-overlay checks and is continuing through
+`test_c2fb.py`.
+
+At 2026-10-29 09:45 UTC, the FreeBASIC runner had 1,379 passed, 5 failed,
+4 running, and 128 ready. The C reference remained complete at 1,513 passed
+and 3 shared profile failures. The fresh C2FB run is still active and has
+advanced through candidate growth into the source-unit catalog-field-growth
+check.
+
+At 2026-10-29 09:48 UTC, the FreeBASIC runner had reached 1,380 passed, with
+the same 5 failed, 4 running, and 127 ready. The C2FB rerun had advanced to
+its generic-header declaration-limit check.
+
+At 2026-10-29 10:03 UTC, a fresh `make -C fb_src audit-function-bodies`
+completed successfully with `SQLITE_DEBUG`, `SQLITE_TEST`, and
+`SQLITE3_FB_COMPILE_DISABLED_BODIES`; the refreshed audit library is
+`build/function-body-audit/libsqlite3-fb-body-audit.so`. FBC reported
+non-fatal pointer-assignment and callback-parameter type warnings during the
+build; those remain review items even though all audited bodies compiled.
+The FreeBASIC full suite had 1,510 passed, 5 failed, and 1 running
+(`test/fuzz3.test`); the C reference remained complete at 1,513 passed and 3
+shared profile failures. The C2FB rerun remains active in its fbfrog target
+matrix checks.
+
+## Matched fixture rebuild (2026-10-29)
+
+The earlier full-suite pair was not capability-matched. Its C fixture reported
+`debug=1`, `unlock_notify=1`, `icu_collations=0`; the FreeBASIC fixture reported
+`debug=0`, `unlock_notify=0`, `icu_collations=1`. Those suite counts are
+historical and do not establish full-suite parity. The C fixture also reused a
+generated parser without the update/delete-limit grammar even though the
+engine advertised that option. Regenerating `parse.c` with the configured
+feature flags corrected that build issue; the rebuilt C fixture passes
+`upfrom4.test` (12/12).
+
+Fresh C and FreeBASIC fixtures now use the same `sqlite_options` array and
+both import Tcl's mutex functions. The fixture builds define `SQLITE_DEBUG=1`,
+`SQLITE_ENABLE_UNLOCK_NOTIFY=1`, `SQLITE_ENABLE_ICU_COLLATIONS=1`, and
+`TCL_THREADS=1`. Focused C / FreeBASIC results are: `notify1` 341/349,
+`notify2` 20/20, `notify3` 34/34, `autoanalyze1` 18/18, `bigsort` 1/1, and
+`icu` 317/305; every run reported zero errors. The assertion-count differences
+in `notify1` and `icu` remain for review despite matching reported capabilities.
+
+The fresh matched full-suite runs are under
+`build/full-suite-c-reference-fullcap-fixed-run-20261029/` and
+`build/full-suite-fb-fullcap-run-20261029/`. At 2026-10-29 10:22 UTC, C had
+34 completed jobs and FreeBASIC had 153; both had four jobs running and no
+failures. The new C2FB regression run is active after a targeted test exposed
+and fixed `--keep-unresolved` emitting an external alias for a skipped static
+helper. The focused helper-declaration regression now passes.
+
+The 8-case `notify1` and 12-case `icu` assertion-count differences in the
+focused runs are confined to `do_malloc_test` iteration IDs: FreeBASIC reaches
+`notify1-5.transient.19/.20` and `.persistent.19/.20` in addition to C, while
+C reaches `icu-5.10.*.133` through `.138` in each journal mode. Both fixtures
+report zero errors, and the full option arrays match. At 2026-10-29 10:27 UTC,
+the refreshed C suite had 239 completed jobs with only the known four-error
+`e_fts3.test` profile failure; the FreeBASIC suite had 210 completed jobs and
+no failures yet. Both runners remain active.
+
+At 2026-10-29 10:31 UTC, the corrected C run had 304 completed jobs and the
+FreeBASIC run had 253. Both report the same four `e_fts3.test` errors; no
+other failures have appeared. The restarted C2FB regression remains active in
+its fbfrog macro-presence target matrix after the static-helper declaration
+fix.
+
+At 2026-10-29 10:32 UTC, C had resolved 359 jobs (358 passed, 1 failed) and
+FreeBASIC had resolved 254 (253 passed, 1 failed). All 254 resolved jobs
+shared by both runs have identical status and error counts: 253 passed on
+both, and both report four errors in `e_fts3.test`. This is 16.8% of the
+1,516-job suite with a directly comparable result so far. Twenty-four common
+jobs have different assertion counts but no status or error-count difference.
+
+At 2026-10-29 10:34 UTC, C had 454 completed jobs and FreeBASIC 254. Their
+254 common resolved jobs still agree exactly: 253 passes and the shared
+`e_fts3.test` failure. The fresh C2FB regression is active in its fbfrog
+macro-value audit after the static-helper fix.
+
+At 2026-10-29 10:35 UTC, C had 528 passed jobs and one failed; FreeBASIC had
+253 passed and one failed. All 254 common resolved jobs agree on status and
+error count: 253 pass on both, and `e_fts3.test` has four errors on both.
+
+At 2026-10-29 10:36 UTC, C had 621 passed jobs and one failed; FreeBASIC
+remained at 253 passed and one failed, with several long-running fault and
+I/O jobs still active. The 254 common resolved jobs still have identical
+status/error results. C2FB has advanced to its preprocessed-tree translation
+check after the helper-linkage fix.
+
+At 2026-10-29 10:38 UTC, C had 693 passed jobs and one failed; FreeBASIC had
+266 passed and one failed. The 267 common resolved jobs still agree: 266 pass
+on both, and `e_fts3.test` is the shared four-error result. The C2FB rerun has
+advanced into its generic-body source-unit array checks.
+
+At 2026-10-29 10:45 UTC, C had 951 passed jobs and 2 failed; FreeBASIC had
+351 passed and 1 failed. Their 352 common resolved jobs agree exactly: 351
+pass on both and `e_fts3.test` has four errors on both. C's second failure is
+`sqllimits1.test`; a separate matched run reports the same ICU `LIKE`
+pattern-limit failure on FreeBASIC (3,122 tests each).
+
+At 2026-10-29 10:48 UTC, C had 1,023 passed jobs and 3 failures; FreeBASIC
+had 425 passed and 1 failure. The 426 common resolved jobs still agree
+exactly: 425 pass on both, with the shared four-error `e_fts3.test` result.
+The C2FB rerun is back in its fbfrog macro-presence audit after the static
+local-union regression fix.
+
+At 2026-10-29 10:51 UTC, C had 1,125 passed jobs and 3 failed; FreeBASIC had
+435 passed and 1 failed. All 436 common resolved jobs match: 435 pass on
+both, and the one shared failure is `e_fts3.test`. C2FB's full regression
+is still active after the focused static-union checks passed.
+
+Matched focused reruns now also reproduce the C results for the other two
+full-suite failures: `fts5bigtok2.test` expects OOM but succeeds on both
+engines, and `sqllimits1.test` expects the built-in pattern-limit error but
+the ICU `LIKE` override accepts the pattern on both. The full FreeBASIC
+runner has not reached those jobs yet.
+
+At 2026-10-29 10:53 UTC, C had 1,225 passed jobs and the same 3 failures;
+FreeBASIC had 479 passed and the shared `e_fts3.test` failure. Their 480
+common resolved jobs still agree exactly: 479 pass on both, one shared
+failure, no status/error differences.
+
+At 2026-10-29 10:55 UTC, C had 1,321 passed jobs and the same 3 failures;
+FreeBASIC had 565 passed and the same shared failure. The 566 common resolved
+jobs still agree: 565 pass on both, with only the shared `e_fts3.test` error.
+
+At 2026-10-29 10:56 UTC, C had 1,363 passed jobs and 3 failures; FreeBASIC
+had 625 passed and 1 failure. The 626 common resolved jobs agree: 625 pass
+on both, and `e_fts3.test` is the only shared failure.
+
+At 2026-10-29 10:58 UTC, C had 1,431 passed jobs and 3 failures; FreeBASIC
+had 629 passed and 1 failure. All 630 common resolved jobs still agree:
+629 pass on both and the only shared failure is `e_fts3.test`.
+
+At 2026-10-29 10:59 UTC, C had 1,495 passed jobs and 3 failures; FreeBASIC
+had 635 passed and 1 failure. The 636 common resolved jobs still match:
+635 pass on both, with the shared `e_fts3.test` failure. The C2FB regression
+has reached SQLite-specific body-storage checks after its fbfrog audit.
+
+At 2026-10-29 11:01 UTC, the matched C suite completed with 1,513 passed and
+3 failures (`fts5bigtok2`, `e_fts3`, `sqllimits1`). The FreeBASIC run had 663
+passed, one `e_fts3` failure, 4 running and 848 ready. Its 691 common resolved
+jobs still agree: 690 pass on both and one shared failure. Focused matched
+runs confirmed the same `fts5bigtok2` and `sqllimits1` results on FreeBASIC.
+
+At 2026-10-29 11:07 UTC, FreeBASIC had 857 passed jobs and the same two
+profile failures already observed on C (`e_fts3` and `sqllimits1`), with four
+jobs running and 653 ready. All 859 common resolved jobs agree: 857 pass on
+both and two shared failures. The remaining C failure, `fts5bigtok2`, has a
+matching focused FreeBASIC result.
+
+At 2026-10-29 11:09 UTC, FreeBASIC had 904 passed jobs, 2 failures, 4 running,
+and 606 ready. The C suite remained complete at 1,513 passed and 3 failures.
+Their 906 common resolved jobs match exactly: 904 pass on both and the shared
+failures are `e_fts3.test` and `sqllimits1.test`. The C-only full-suite failure
+is `fts5bigtok2.test`; the focused FreeBASIC run reproduces it. The fresh C2FB
+regression is active after focused static-union and complex-record checks pass.
+
+At 2026-10-29 11:11 UTC, FreeBASIC had 932 passed jobs, 2 failures, 4 running,
+and 578 ready; C remained complete at 1,513 passed and 3 failures. Their 934
+common resolved jobs still have no status/error differences: 932 pass on both
+and the shared failures are `e_fts3.test` and `sqllimits1.test`. The C-only
+`fts5bigtok2.test` result has already matched in a focused FreeBASIC run. The
+restarted C2FB regression remains active in the fbfrog macro-value audit.
+
+At 2026-10-29 11:12 UTC, FreeBASIC had 948 passed jobs, 2 failures, 4 running,
+and 562 ready. The 950 common resolved jobs still have no result differences:
+948 pass on both and the shared failures are `e_fts3.test` and `sqllimits1.test`.
+
+At 2026-10-29 11:14 UTC, FreeBASIC had 955 passed jobs, 2 failures, 4 running,
+and 555 ready. Its 957 resolved jobs match the completed C results: 955 pass
+on both and the shared failures are `e_fts3.test` and `sqllimits1.test`.
+
+At 2026-10-29 11:15 UTC, FreeBASIC had 974 passed jobs and the same 2
+failures, with 4 running and 536 ready. All 976 common resolved jobs still
+match: 974 pass on both and the two shared failures remain `e_fts3.test` and
+`sqllimits1.test`. C2FB has advanced to its preprocessed-tree translation test.
+
+At 2026-10-29 11:16 UTC, FreeBASIC had 986 passed jobs and the same 3 failures
+as C (`fts5bigtok2`, `e_fts3`, `sqllimits1`), with 4 running and 523 ready.
+All 989 common resolved jobs agree: 986 pass on both and there are no
+status/error mismatches. C2FB is at its SQLite FTS5 index-pointer source-unit
+check after the complex-record fix.
+
+At 2026-10-29 11:17 UTC, FreeBASIC had 987 passed jobs, 3 failures, 4 running,
+and 522 ready. C had completed 1,513 passed and 3 failed. All 990 resolved
+jobs common to both suites now agree: 987 pass on both and all three profile
+failures are shared. C2FB has advanced into its target-matrix audit.
+
+At 2026-10-29 11:20 UTC, FreeBASIC had 1,062 passed jobs and the same 3
+profile failures as the completed C suite, with 4 running and 447 ready. All
+1,065 common resolved jobs agree: 1,062 pass on both and the three failures
+are shared. The logged C2FB full regression rerun is active in candidate
+growth checks.
+
+At 2026-10-29 11:21 UTC, FreeBASIC had 1,087 passed jobs and 3 failures,
+with 4 running and 422 ready. C is complete with 1,513 passed and 3 failures.
+All 1,089 common resolved jobs match: 1,086 pass on both and all three
+failures are shared. The latest C2FB full rerun is logged at
+`/tmp/c2fb-sqlite-full-rerun-20261029.log` and is active in its fbfrog audit.
+
+At 2026-10-29 11:23 UTC, FreeBASIC had 1,127 passed jobs, 3 failures,
+4 running, and 382 ready. The 1,130 common resolved jobs still match exactly:
+1,127 pass on both, with the same three profile failures as C.
+
+The latest C2FB retry also updates the unsupported-value regression: C
+`long double` records are now represented by the supported `CLongDouble`
+layout, so the fixture uses C `_Complex` as the unsupported by-value field.
+C2FB explicitly rejects complex values and keeps pointers opaque; the focused
+header regression passes. The full C2FB log is being captured at
+`/tmp/c2fb-sqlite-full-rerun-20261029.log`.
+
+At 2026-10-29 11:25 UTC, FreeBASIC had 1,200 passed jobs, 3 failures, 4
+running, and 309 ready. Its 1,203 resolved jobs all match the completed C
+results: 1,200 pass on both and the same three profile failures. C2FB remains
+active in the fbfrog macro-value audit.
+
+At 2026-10-29 11:27 UTC, FreeBASIC had 1,233 passed jobs, the same 3 shared
+profile failures, 4 running, and 276 ready. Its 1,236 common resolved jobs
+match C; the logged C2FB rerun is active in the fbfrog target matrix.
+
+At 2026-10-29 11:28 UTC, FreeBASIC had 1,280 passed jobs, the same 3
+failures, 4 running, and 229 ready. Its resolved jobs still agree with C;
+the current C2FB full regression is active in the fbfrog target matrix.
+
+At 2026-10-29 11:29 UTC, FreeBASIC had 1,281 passed jobs and the same 3
+failures, with 4 running and 228 ready. The 1,284 common resolved jobs still
+match exactly: 1,281 pass on both with no status/error differences. The C2FB
+full rerun remains active in its fbfrog audit.
+
+At 2026-10-29 11:30 UTC, FreeBASIC had 1,288 passed jobs and 3 failures,
+with 4 running and 221 ready. Its 1,291 common resolved jobs match the C
+results exactly: 1,288 pass on both and all three failures are shared. C2FB
+has advanced to its generic-body runtime-candidate compile checks.
+
+At 2026-10-29 11:32 UTC, FreeBASIC had 1,307 passed jobs, 3 failures,
+4 running, and 202 ready. The 1,310 common resolved jobs all match: 1,307
+pass on both and the three shared failures remain the same. C2FB's logged
+full regression is still active.
+
+### Matched full-suite completion
+
+At 2026-10-29 11:39 UTC, the matched C and FreeBASIC full-cap runs each
+resolved all 1,516 test jobs. Both ended with 1,513 passing jobs and the same
+three failing jobs: `ext/fts5/test/fts5bigtok2.test`, `test/e_fts3.test`, and
+`test/sqllimits1.test`. A join by test-job ID found no difference in job status
+or error count across the complete suite, so the FreeBASIC run introduced no
+additional failing test job.
+
+The two runners recorded different assertion totals (1,980,820 for FreeBASIC
+and 1,873,060 for C), and 137 individual job counts differed. Allocation-fault
+runs repeat tests a build-dependent number of times, so these totals are not a
+one-for-one measure of coverage. The job outcome and error-count comparison is
+the useful parity measure here.
+
+Stored failure excerpts are also consistent: the FTS5 big-token and SQL-limit
+messages match exactly, as does the base e_fts3 cleanup error. The e_fts3
+allocation-fault subcase suffixes differ because the two builds reach different
+fault-injection iteration numbers.
+
+The C2FB regression completed after linking the FreeBASIC long-double runtime
+for the 32-bit `int128` fixture. The full result is recorded in the later
+`C2FB callback nulls and full regression` section.
+
+### R-Tree match-argument flexible-tail ABI check
+
+`make -C fb_src check-rtree-matcharg-layout` now compiles the upstream
+`RtreeMatchArg` definition from `ext/rtree/rtree.c` and the production
+`SqliteRtreeMatchArg` declaration, then compares the parameter-tail offset.
+Both report 56 bytes on Linux x86-64. The FreeBASIC record size is 64 bytes
+because it uses a one-element addressable tail; C's C99 flexible-array record
+size remains 56 bytes. The companion
+`make -C fb_src check-rtree-matcharg-layout-win32-wine` target compares the
+SQLite amalgamation with the production FreeBASIC type under Wine; both report
+offset 32 for Win32. The Win64 match-blob offset was not separately executed by
+these two targets.
+
+### C2FB callback nulls and full regression (2026-10-29 13:15 UTC)
+
+The matched SQLite suite and the complete C2FB regression were rechecked after
+adding the callback-layout probes. The C2FB run finished with 4/4 archive-overlay
+tests, 11,154 C/FreeBASIC behavior comparisons on each of the native and GCC
+backends, 166 candidates accepted, and 36 unsupported functions reported.
+
+The source-unit run exposed null callback initializers that referenced callback
+aliases absent from an included record context. C2FB now emits a context-typed
+`0` for null callback values. The `sfx_driver_null.c` source-unit candidate
+compiles, and regressions verify both callback-array null slots and rejection
+of writes to C `const` callback objects. The converter documentation describes
+this storage rule in `fb_tools/c2fb/README.md`.
+
+Fresh inventories report 3,263/3,263 core function bodies, 1,339 active
+selected-extension bodies with 15 separately classified upstream exclusions,
+125/125 top-level C files classified, no unexpected extension API gaps, and an
+empty repair queue.
+
+Win32 callback and WAL smoke tests and the new Win32 R-Tree offset probe pass
+under Wine. A full Windows Tcl run remains unverified: the installed i686 MinGW
+toolchain has no Tcl headers or import library, and no Windows `testfixture.exe`
+is available. The full matched Tcl suite result above is for Linux.
+
+### Fresh disabled-body compile audit (2026-10-29 13:43 UTC)
+
+A forced `make -B audit-function-bodies` completed successfully with
+`SQLITE_DEBUG`, `SQLITE_TEST`, and `SQLITE3_FB_COMPILE_DISABLED_BODIES` enabled.
+All 3,263 indexed core bodies matched and compiled, with zero FBC warnings or
+errors. The audit first exposed pointer-type mismatches in parser cleanup
+callbacks and Walker callback aliases. The port now uses the C pointer types
+and explicit callback casts at those boundaries; function-table and record
+comparator pointers are cast to their declared FreeBASIC callback types. No FBC
+source change was needed. A C API smoke linked against the rebuilt audit
+library passed `CREATE`, `INSERT`, a `LIKE` query, CTE `SELECT`,
+`ALTER TABLE RENAME COLUMN`, another CTE query, `DROP TABLE`, and close.
+
+### Walker callback ABI verification (2026-10-29 13:45 UTC)
+
+`SqliteWalkerExprCallback`, `SqliteWalkerSelectCallback`, and
+`SqliteWalkerSelectCallback2` now retain the C pointer types in their callback
+signatures. A forward FreeBASIC type alias breaks the `Walker`/callback record
+cycle without changing the record layout. The `check-walker-layout` C/FBC probe
+matches offsets and size at `8/40/48` bytes on x86-64; the Win32 Wine target
+matches `4/24/28` bytes. The forced disabled-body audit still compiles all
+3,263 indexed core bodies with zero warnings or errors after the callback
+boundary casts.
+
+### Latest-tree full-suite rerun (2026-10-29 15:59 UTC)
+
+The matched Linux full Tcl suite was rerun after the callback pointer and
+boundary-cast edits. The latest FreeBASIC library rebuilt successfully. To
+avoid host-specific test counts, the fixture workers ran with
+`ulimit -n 1024`; `test/misc7.test` opens files until this limit is reached.
+The run directory was under `/dev/shm` because `writecrash.test` creates
+multi-gigabyte temporary databases.
+
+All 1,516 jobs completed: 1,513 passed and the same three failed in the C and
+FreeBASIC runs (`fts5bigtok2.test`, `e_fts3.test`, and `sqllimits1.test`). A
+job-ID comparison found zero status or error-count mismatches. C recorded
+1,873,060 assertions and FreeBASIC 1,979,914, with six errors in each run.
+The FreeBASIC run took 1:11:31. With the descriptor cap,
+`test/misc7.test` completed 1,117 checks with zero errors. Assertion counts
+differed in 138 jobs, mostly because allocation-fault tests repeat a
+build-dependent number of iterations; `misc7.test` also varies with the number
+of descriptors already open by the process. These totals are not a one-for-one
+measure of coverage. The completed run artifacts are saved in
+`build/full-suite-fb-capped-latest-20261029/`.
+
+The full library build emitted five FreeBASIC warnings for callback pointer
+types passed to `sessionBindRow()` in `sqlite3_bulk_session_changeset.bas`; it
+had no build errors. The body audit and C API smoke still pass. The full
+Windows Tcl suite remains unverified because a Windows Tcl import library and
+`testfixture.exe` are unavailable.
+
+### Session callback warning follow-up (2026-10-29 16:10 UTC)
+
+The five `sessionBindRow()` warnings came from passing the changeset callback
+functions without an explicit FreeBASIC callback-type cast. The port now casts
+those five function pointers to `c2fb_callback_223`, matching the C callback
+boundary while preserving the existing hook callback signature. The rebuilt
+full-feature library compiles with zero warnings and errors. The unchanged
+`ext/session/sessionB.test` passes 125/125, and `ext/session/sessionfault.test`
+passes 14,057/14,057 with no tracked leaks. These focused checks follow the
+full-suite run above; the full suite has not been rerun after this cast-only
+cleanup.
+
+### Unix PRNG process handling (2026-10-29 18:09 UTC)
+
+The Unix VFS now tracks the process ID used to seed SQLite's PRNG. If a
+forked process opens a database, it clears the inherited PRNG state before
+continuing, matching `unixOpen()` in `src/os_unix.c`. When both `getrandom()`
+and `/dev/urandom` fail in release builds, the port now seeds the buffer from
+the current time and process ID, as upstream does. Reads from `/dev/urandom`
+use the overrideable `read()` path, matching the C VFS. `SQLITE_TEST` continues
+to use a zero-filled seed; release builds retain kernel entropy.
+
+The release library and a `SQLITE_TEST`/`SQLITE_DEBUG` library both compile.
+The C API probe in `tests/sqlite_prng_fork_smoke.c` passes against the
+FreeBASIC release and test libraries and the system SQLite library: the parent
+and child produce different random streams after opening separate databases.
+`LD_PRELOAD` probes forced `getrandom()` to fail and then forced both kernel
+entropy sources to fail; the `/dev/urandom` read path and time/PID fallback
+both passed.
+
+The refreshed inventories still report 3,263/3,263 core bodies, 1,339/1,339
+active selected-extension bodies, 125/125 top-level source files classified,
+and no unexpected extension API gaps.
+
+The ongoing full Linux Tcl run was started before this process-handling change.
+It currently has 1,512 completed jobs, the same three C-baseline failures, and
+`test/savepoint4.test` still running. Its result will not verify this latest
+change; the fork probe is the direct evidence for this behavior. The current
+partial database and log snapshot are saved in
+`build/full-suite-fb-prng-fixed-partial-20261029/`.
+
+### POSIX DELETEONCLOSE timing and savepoint crash test (2026-10-29 19:24 UTC)
+
+The fixed-seed full-suite run exposed a Unix VFS mismatch in the crash test.
+When a crash child spilled its in-memory savepoint journal, the test VFS opened
+it with a null filename. The FreeBASIC VFS kept the `DELETEONCLOSE` file until
+its close callback; crash exits skip that callback, so each retry left the
+same deterministic temp filename behind. Later retries exhausted temp-name
+attempts and returned `SQLITE_ERROR` from the second indexed DELETE.
+
+The Unix VFS now unlinks `DELETEONCLOSE` files immediately after opening them,
+matching upstream POSIX behavior. Deferred unlink remains in effect for
+`OS_VXWORKS` and `SQLITE_UNLINK_AFTER_CLOSE` builds. The unchanged
+`test/savepoint4.test` passes **3,803/3,803** checks with zero errors and no
+tracked leaks; its fresh temp directory contains no leftover `etilqs_*` files.
+The prior stale-temp run was stopped after saving its 1,512-job partial result
+and 85 stale temp filenames in `build/full-suite-fb-prng-fixed-partial-20261029/`.
+
+A new matched Linux full-suite run is in progress against the temp-file fix at
+`/dev/shm/sqlite-fb-tempfile-unlink-full-20261029/`. Its initial workers are
+running the unchanged Tcl jobs with the descriptor cap and a fresh temp
+directory.
+
+The release library also rebuilds cleanly after the Unix VFS change. The
+public C API fork smoke passes against that release library, including probes
+that force `getrandom()` and then both kernel entropy sources to fail. At
+2026-10-29 19:29 UTC, the fresh full run had 55 jobs complete, four running,
+and zero failures; its `SQLITE_TMPDIR` contained no leftover `etilqs_*` files.
+At 2026-10-29 19:35 UTC, 198 jobs had completed, four were running, and no
+failures had been recorded. All 198 job states and error counts match the saved
+C baseline exactly. The latest database and logs are snapshotted under
+`build/full-suite-fb-tempfile-unlink-partial-20261029/`.

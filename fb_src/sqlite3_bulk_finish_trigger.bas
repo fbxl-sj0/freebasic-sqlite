@@ -925,7 +925,7 @@ Sub sqlite3FinishTrigger CDecl Alias "sqlite3FinishTrigger" (ByVal arg0 As Sqlit
         local6 = Cast(sqlite3_int64, Cast(sqlite3_int64, (c2fb_temp_7 + 1)))
     Wend
     c2fb_flow_0:
-    If (-Cast(SQLITE_C_INT, ((local6 > Cast(sqlite3_int64, arg0->db->aLimit(Cast(SQLITE_C_INT, 14ULL))))))) Then
+    If (-Cast(SQLITE_C_INT, ((local6 > Cast(sqlite3_int64, arg0->db->aLimit(SQLITE_LIMIT_TRIGGER_STEPS)))))) Then
         sqlite3ErrorMsg(CPtr(Any Ptr, arg0), StrPtr(!"trigger \034%w\034 contains too many steps"), local1)
         Goto c2fb_label_0
     End If

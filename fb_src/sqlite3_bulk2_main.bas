@@ -917,6 +917,11 @@ Function sqlite3_overload_function CDecl Alias "sqlite3_overload_function" (ByVa
     Dim c2fb_temp_0 As SQLITE_C_INT
     Dim c2fb_temp_1 As ZString Ptr
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg1 = 0 OrElse arg2 < -2 Then _
+        Return SQLITE_MISUSE
+#endif
+
     ' C automatic storage declaration
     ' C automatic storage declaration
     sqlite3_mutex_enter(arg0->mutex)
@@ -941,6 +946,13 @@ Function sqlite3_autovacuum_pages CDecl Alias "sqlite3_autovacuum_pages" (ByVal 
     Dim c2fb_temp_3 As Any Ptr
     Dim c2fb_temp_4 As SqliteDbDestructor Ptr
     Dim c2fb_temp_5 As Sub CDecl(ByVal arg0 As Any Ptr)
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then
+        If arg3 <> 0 Then arg3(arg2)
+        Return SQLITE_MISUSE
+    End If
+#endif
 
     sqlite3_mutex_enter(arg0->mutex)
     If CPtr(Sub CDecl(ByVal arg0 As Any Ptr), arg0->xAutovacDestr) Then

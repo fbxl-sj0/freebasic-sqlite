@@ -1,0 +1,9 @@
+; Project: SQLite FreeBASIC port
+; File: wal_seh_kernel32.def
+; Purpose: Build import libraries for the Wine SEH and WAL fault smoke tests.
+; This file intentionally does not define any Windows API implementation.
+LIBRARY kernel32.dll
+EXPORTS
+    ExitProcess
+    RaiseException
+; end of wal_seh_kernel32.def

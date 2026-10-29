@@ -1125,7 +1125,9 @@ Sub sqlite3ExprCodeGetColumnOfTable CDecl Alias "sqlite3ExprCodeGetColumnOfTable
     ' C unused-parameter annotation
     If (-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, ((arg3 < Cast(SQLITE_C_INT, &O0ULL))))) OrElse (-Cast(SQLITE_C_INT, ((arg3 = Cast(SQLITE_C_INT, arg1->iPKey))))))))) Then
         sqlite3VdbeAddOp2(arg0, Cast(SQLITE_C_INT, 137ULL), arg2, arg4)
-        ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(arg0, StrPtr("%s.rowid"), arg1->zName)
+#endif
     Else
         ' C automatic storage declaration
         If ((-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_INT, (arg1)->eTabType) = Cast(SQLITE_C_INT, 1ULL)))))) Then

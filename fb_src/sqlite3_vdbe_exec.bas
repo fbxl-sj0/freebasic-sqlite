@@ -6244,6 +6244,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
             sqlite3VdbeMemShallowCopy( _
                 @pVdbe->aMem[pOp->p2], @pVdbe->aMem[pOp->p1], MEM_EPHEM)
+#ifdef SQLITE_DEBUG
+            pVdbe->aMem[pOp->p2].pScopyFrom = @pVdbe->aMem[pOp->p1]
+            pVdbe->aMem[pOp->p2].mScopyFlags = pVdbe->aMem[pOp->p1].flags
+            pVdbe->aMem[pOp->p1].bScopy = 1
+#endif
 
         Case OP_IntCopy
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _

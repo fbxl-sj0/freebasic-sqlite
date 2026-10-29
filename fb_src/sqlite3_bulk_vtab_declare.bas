@@ -903,6 +903,11 @@ Function sqlite3_declare_vtab CDecl Alias "sqlite3_declare_vtab" (ByVal arg0 As 
     Dim c2fb_temp_41 As UByte
     Dim c2fb_temp_42 As SQLITE_C_INT
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg1 = 0 Then _
+        Return SQLITE_MISUSE
+#endif
+
     ' C automatic storage declaration
     local1 = Cast(SQLITE_C_INT, &O0ULL)
     ' C automatic storage declaration

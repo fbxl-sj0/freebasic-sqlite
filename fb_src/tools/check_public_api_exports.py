@@ -13,7 +13,7 @@ Purpose:
 Responsibilities:
 
     - Read sqlite3_* aliases from sqlite3_api_declarations.bi.
-    - Inspect dynamic symbols with nm.
+    - Inspect ELF dynamic symbols with nm and PE exports with objdump.
     - Allow profile-specific omissions to be listed explicitly.
 
 This file intentionally does NOT contain:
@@ -32,6 +32,11 @@ from pathlib import Path
 
 
 ALIAS_PATTERN = re.compile(r'Alias\s+"(sqlite3_[A-Za-z0-9_]+)"')
+PE_EXPORT_PATTERN = re.compile(
+    r"^\s*\[\s*\d+\]\s+\+base\[\s*\d+\]\s+\S+\s+"
+    r"(sqlite3_[A-Za-z0-9_]+)\s*$",
+    re.MULTILINE,
+)
 
 
 def read_declared_api(path: Path) -> set[str]:
@@ -39,7 +44,19 @@ def read_declared_api(path: Path) -> set[str]:
     return set(ALIAS_PATTERN.findall(source))
 
 
-def read_exported_symbols(library: Path, nm: str) -> set[str]:
+def read_exported_symbols(library: Path, nm: str, objdump: str) -> set[str]:
+    with library.open("rb") as library_file:
+        is_pe = library_file.read(2) == b"MZ"
+
+    if is_pe:
+        result = subprocess.run(
+            [objdump, "-p", str(library)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return set(PE_EXPORT_PATTERN.findall(result.stdout))
+
     result = subprocess.run(
         [nm, "-D", "--defined-only", str(library)],
         check=True,
@@ -70,6 +87,11 @@ def main() -> int:
         help="nm executable to use",
     )
     parser.add_argument(
+        "--objdump",
+        default="objdump",
+        help="objdump executable to use for PE DLL exports",
+    )
+    parser.add_argument(
         "--allow-missing",
         action="append",
         default=[],
@@ -85,7 +107,7 @@ def main() -> int:
 
     try:
         declared = read_declared_api(args.declarations)
-        exported = read_exported_symbols(args.library, args.nm)
+        exported = read_exported_symbols(args.library, args.nm, args.objdump)
     except (OSError, subprocess.CalledProcessError) as error:
         print(f"API export inspection failed: {error}", file=sys.stderr)
         return 2

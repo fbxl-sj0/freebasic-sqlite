@@ -50,6 +50,28 @@
 #include once "sqlite3_debug_assert.bi"
 #include once "sqlite3_win_exception_types.bi"
 
+Type SqliteWalSehStep As Sub CDecl (ByVal pWal As Any Ptr)
+Type SqliteWalSehWork As Function CDecl (ByVal pContext As Any Ptr) As SQLITE_C_INT
+Type SqliteWalSehFilter As Function CDecl ( _
+    ByVal pWal As Any Ptr, _
+    ByVal exceptionCode As SQLITE_C_UINT, _
+    ByVal pExceptionInformation As Any Ptr _
+) As SQLITE_C_INT
+Type SqliteWalSehCatch As Function CDecl (ByVal pWal As Any Ptr) As SQLITE_C_INT
+
+#if defined(SQLITE_OS_WIN) AndAlso defined(SQLITE_USE_SEH)
+Declare Function sqlite3WinWalSehRun CDecl Alias "sqlite3WinWalSehRun" ( _
+    ByVal pWal As Any Ptr, _
+    ByVal pContext As Any Ptr, _
+    ByVal xEnter As SqliteWalSehStep, _
+    ByVal xWork As SqliteWalSehWork, _
+    ByVal xLeave As SqliteWalSehStep, _
+    ByVal xFilter As SqliteWalSehFilter, _
+    ByVal xCatch As SqliteWalSehCatch, _
+    ByVal invalidResult As SQLITE_C_INT _
+) As SQLITE_C_INT
+#endif
+
 #if defined(SQLITE_TEST) AndAlso defined(SQLITE_DEBUG) AndAlso Not defined(SQLITE_OMIT_WAL)
 ' Preserve the process-wide trace switch linked by upstream testfixture.
 Extern sqlite3WalTrace Alias "sqlite3WalTrace" As SQLITE_C_INT
@@ -124,6 +146,10 @@ Private Const SQLITE_WAL_MAGIC As u32 = &H377F0682
 #define CKPT_SYNC_FLAGS(syncFlags) (((syncFlags) Shr 2) And &H03)
 
 #include once "sqlite3_wal_types.bi"
+
+Declare Sub walSehInjectFault CDecl Alias "walSehInjectFault" ( _
+    ByVal pWal As SqliteWal Ptr _
+)
 
 #if defined(SQLITE_DEBUG) AndAlso defined(SQLITE_USE_SEH)
 Private Function walAssertLockmask CDecl Alias "walAssertLockmask" ( _
@@ -261,6 +287,7 @@ Private Function walIndexPage CDecl Alias "walIndexPage" ( _
 ) As SQLITE_C_INT
 
     If pWal = 0 OrElse ppPage = 0 OrElse pageIndex < 0 Then Return SQLITE_MISUSE
+    walSehInjectFault(pWal)
     If pageIndex >= pWal->walIndexDataCount OrElse pWal->walIndexData[pageIndex] = 0 Then
         Return walIndexPageRealloc(pWal, pageIndex, ppPage)
     End If
@@ -273,6 +300,7 @@ Private Function walCkptInfo CDecl Alias "walCkptInfo" ( _
 ) As SqliteWalCheckpointInfo Ptr
     If pWal = 0 OrElse pWal->walIndexDataCount = 0 OrElse pWal->walIndexData = 0 OrElse _
        pWal->walIndexData[0] = 0 Then Return 0
+    walSehInjectFault(pWal)
     Dim pHeaderBytes As UByte Ptr = CPtr(UByte Ptr, pWal->walIndexData[0])
     Return CPtr(SqliteWalCheckpointInfo Ptr, pHeaderBytes + (2 * SizeOf(SqliteWalIndexHeader)))
 End Function
@@ -281,6 +309,7 @@ Private Function walIndexHdr CDecl Alias "walIndexHdr" ( _
     ByVal pWal As SqliteWal Ptr _
 ) As SqliteWalIndexHeader Ptr
     If pWal = 0 OrElse pWal->walIndexDataCount = 0 OrElse pWal->walIndexData = 0 Then Return 0
+    walSehInjectFault(pWal)
     Return CPtr(SqliteWalIndexHeader Ptr, pWal->walIndexData[0])
 End Function
 
@@ -540,6 +569,101 @@ Private Function walHandleException CDecl Alias "walHandleException" ( _
     Return SQLITE_IOERR_IN_PAGE
 End Function
 #endif
+
+Private Sub walSehEnter CDecl Alias "walSehEnter" (ByVal pWalArgument As Any Ptr)
+#ifdef SQLITE_DEBUG
+    If pWalArgument = 0 Then Return
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+#if defined(SQLITE_OS_WIN) AndAlso defined(SQLITE_USE_SEH)
+    If walAssertLockmask(pWal) = 0 Then Return
+#endif
+    If pWal->sehTryCount <> 0 Then
+        sqlite3DebugAssert(StrPtr("WAL SEH try blocks are not nested"))
+        Return
+    End If
+    pWal->sehTryCount += 1
+#endif
+End Sub
+
+Private Sub walSehLeave CDecl Alias "walSehLeave" (ByVal pWalArgument As Any Ptr)
+#ifdef SQLITE_DEBUG
+    If pWalArgument = 0 Then Return
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+    pWal->sehTryCount -= 1
+    If pWal->sehTryCount <> 0 Then _
+        sqlite3DebugAssert(StrPtr("WAL SEH try state is balanced"))
+#endif
+End Sub
+
+Private Sub walSehInjectFault CDecl Alias "walSehInjectFault" ( _
+    ByVal pWal As SqliteWal Ptr _
+)
+#if defined(SQLITE_OS_WIN) AndAlso defined(SQLITE_USE_SEH)
+    sehInjectFault(pWal)
+#else
+#ifdef SQLITE_DEBUG
+    If pWal = 0 OrElse pWal->sehTryCount <= 0 Then _
+        sqlite3DebugAssert(StrPtr("WAL fault injection requires an active try block"))
+#endif
+#endif
+End Sub
+
+#ifdef SQLITE_USE_SEH
+#ifdef SQLITE_OS_WIN
+Private Function walSehFilter CDecl Alias "walSehFilter" ( _
+    ByVal pWalArgument As Any Ptr, _
+    ByVal exceptionCode As SQLITE_C_UINT, _
+    ByVal pExceptionInformation As Any Ptr _
+) As SQLITE_C_INT
+    Return sehExceptionFilter( _
+        CPtr(SqliteWal Ptr, pWalArgument), _
+        Cast(SQLITE_C_INT, exceptionCode), _
+        CPtr(SqliteWinExceptionPointers Ptr, pExceptionInformation))
+End Function
+#endif
+
+Private Function walSehCatchHandle CDecl Alias "walSehCatchHandle" ( _
+    ByVal pWalArgument As Any Ptr _
+) As SQLITE_C_INT
+    Return walHandleException(CPtr(SqliteWal Ptr, pWalArgument))
+End Function
+#endif
+
+Private Function walSehCatchIoerr CDecl Alias "walSehCatchIoerr" ( _
+    ByVal pWalArgument As Any Ptr _
+) As SQLITE_C_INT
+    If pWalArgument = 0 Then Return SQLITE_MISUSE
+    Return SQLITE_IOERR_IN_PAGE
+End Function
+
+Private Function walSehCatchIgnore CDecl Alias "walSehCatchIgnore" ( _
+    ByVal pWalArgument As Any Ptr _
+) As SQLITE_C_INT
+    If pWalArgument = 0 Then Return SQLITE_MISUSE
+    Return SQLITE_OK
+End Function
+
+Private Function walRunSeh CDecl Alias "walRunSeh" ( _
+    ByVal pWal As SqliteWal Ptr, _
+    ByVal pContext As Any Ptr, _
+    ByVal xWork As SqliteWalSehWork, _
+    ByVal xCatch As SqliteWalSehCatch _
+) As SQLITE_C_INT
+    If pWal = 0 OrElse pContext = 0 OrElse xWork = 0 Then Return SQLITE_MISUSE
+#if defined(SQLITE_OS_WIN) AndAlso defined(SQLITE_USE_SEH)
+    Return sqlite3WinWalSehRun(pWal, pContext, @walSehEnter, xWork, _
+        @walSehLeave, @walSehFilter, xCatch, SQLITE_MISUSE)
+#else
+#ifdef SQLITE_DEBUG
+    walSehEnter(pWal)
+#endif
+    Dim result As SQLITE_C_INT = xWork(pContext)
+#ifdef SQLITE_DEBUG
+    walSehLeave(pWal)
+#endif
+    Return result
+#endif
+End Function
 
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
 Function sqlite3WalWriteLock CDecl Alias "sqlite3WalWriteLock" ( _
@@ -867,6 +991,7 @@ Private Function walFramePgno CDecl Alias "walFramePgno" ( _
 ) As u32
     If pWal = 0 OrElse frameIndex = 0 Then Return 0
     Dim hashPageIndex As SQLITE_C_INT = walFramePage(frameIndex)
+    walSehInjectFault(pWal)
     If hashPageIndex < 0 OrElse hashPageIndex >= pWal->walIndexDataCount OrElse _
        pWal->walIndexData = 0 OrElse pWal->walIndexData[hashPageIndex] = 0 Then Return 0
 
@@ -910,6 +1035,7 @@ Private Function walFindFrame CDecl Alias "walFindFrame" ( _
 
         walShmBarrier(pWal)
         Dim hashIndex As SQLITE_C_INT = walHash(pageNumber)
+        walSehInjectFault(pWal)
         Dim collisionsRemaining As SQLITE_C_INT = SQLITE_WAL_HASHTABLE_NSLOT
         While 1
             Dim hashValue As UShort = location.aHash[hashIndex]
@@ -941,13 +1067,39 @@ Private Function walFindFrame CDecl Alias "walFindFrame" ( _
     Return SQLITE_OK
 End Function
 
+Type SqliteWalFindFrameSehContext
+    pWal As SqliteWal Ptr
+    pageNumber As u32
+    pReadFrame As u32 Ptr
+End Type
+
+Private Function walFindFrameSehWork CDecl Alias "walFindFrameSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalFindFrameSehContext Ptr = _
+        CPtr(SqliteWalFindFrameSehContext Ptr, pContext)
+    Return walFindFrame(callContext->pWal, callContext->pageNumber, _
+                        callContext->pReadFrame)
+End Function
+
 Function sqlite3WalFindFrame CDecl Alias "sqlite3WalFindFrame" ( _
     ByVal pWalArgument As Any Ptr, _
     ByVal pageNumber As SQLITE_C_UINT, _
     ByVal pReadFrame As SQLITE_C_UINT Ptr _
 ) As SQLITE_C_INT
     If pWalArgument = 0 OrElse pReadFrame = 0 Then Return SQLITE_MISUSE
-    Return walFindFrame(CPtr(SqliteWal Ptr, pWalArgument), pageNumber, pReadFrame)
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    Dim callContext As SqliteWalFindFrameSehContext
+    callContext.pWal = pWal
+    callContext.pageNumber = pageNumber
+    callContext.pReadFrame = pReadFrame
+    Return walRunSeh(pWal, @callContext, @walFindFrameSehWork, _
+                     @walSehCatchIoerr)
+#else
+    Return walFindFrame(pWal, pageNumber, pReadFrame)
+#endif
 End Function
 
 
@@ -1251,6 +1403,9 @@ Private Function walIteratorInit CDecl Alias "walIteratorInit" ( _
     End If
 
     Dim rc As SQLITE_C_INT = SQLITE_OK
+#ifdef SQLITE_USE_SEH
+    pWal->pFree = pMemory
+#endif
     For hashPage As SQLITE_C_INT = firstHashPage To lastHashPage
         Dim location As SqliteWalHashLocation
         rc = walHashGet(pWal, hashPage, @location)
@@ -1326,9 +1481,15 @@ Private Function walIteratorInit CDecl Alias "walIteratorInit" ( _
     Next
 
     If rc <> SQLITE_OK Then
+#ifdef SQLITE_USE_SEH
+        pWal->pFree = 0
+#endif
         sqlite3_free(pMemory)
         Return rc
     End If
+#ifdef SQLITE_USE_SEH
+    pWal->pFree = 0
+#endif
     ppIterator[0] = pIterator
     Return SQLITE_OK
 End Function
@@ -1506,6 +1667,9 @@ Private Function walIndexRecover CDecl Alias "walIndexRecover" ( _
             rc = SQLITE_NOMEM
             GoTo recovery_cleanup
         End If
+#ifdef SQLITE_USE_SEH
+        pWal->pFree = frameBuffer
+#endif
 
         Dim pData As UByte Ptr = frameBuffer + SQLITE_WAL_FRAME_HEADER_SIZE
         privateIndexPage = CPtr(u32 Ptr, pData + pageSize)
@@ -1538,6 +1702,10 @@ Private Function walIndexRecover CDecl Alias "walIndexRecover" ( _
             For wordIndex As SQLITE_C_INT = 0 To pageWordCount - 1
                 privateIndexPage[wordIndex] = 0
             Next
+#ifdef SQLITE_USE_SEH
+            pWal->walIndexPage = pageIndex
+            pWal->pWalIndexValue = pSharedPage
+#endif
             pWal->walIndexData[pageIndex] = privateIndexPage
 
             Dim firstFrame As sqlite3_uint64 = 1
@@ -1577,6 +1745,10 @@ Private Function walIndexRecover CDecl Alias "walIndexRecover" ( _
             Wend
 
             pWal->walIndexData[pageIndex] = pSharedPage
+#ifdef SQLITE_USE_SEH
+            pWal->walIndexPage = 0
+            pWal->pWalIndexValue = 0
+#endif
             Dim headerBytes As SQLITE_C_INT = 0
             If pageIndex = 0 Then headerBytes = SQLITE_WALINDEX_HEADER_SIZE
             Dim headerWords As SQLITE_C_INT = headerBytes \ SizeOf(u32)
@@ -1590,8 +1762,12 @@ Private Function walIndexRecover CDecl Alias "walIndexRecover" ( _
                     pSharedPage[wordIndex] = privateIndexPage[wordIndex]
             Next
 #endif
+            walSehInjectFault(pWal)
             If rc <> SQLITE_OK OrElse frameIndex <= lastFrameInPage Then Exit For
         Next
+#ifdef SQLITE_USE_SEH
+        pWal->pFree = 0
+#endif
         sqlite3_free(frameBuffer)
         frameBuffer = 0
         If rc <> SQLITE_OK Then GoTo recovery_cleanup
@@ -1620,6 +1796,7 @@ recovery_finish:
                 Else
                     pInfo->readMark(readIndex) = READMARK_NOT_USED
                 End If
+                walSehInjectFault(pWal)
                 walUnlockExclusive(pWal, WAL_READ_LOCK_BASE + readIndex, 1)
             ElseIf rc <> SQLITE_BUSY Then
                 GoTo recovery_cleanup
@@ -1633,7 +1810,12 @@ recovery_finish:
     End If
 
 recovery_cleanup:
-    If frameBuffer <> 0 Then sqlite3_free(frameBuffer)
+    If frameBuffer <> 0 Then
+#ifdef SQLITE_USE_SEH
+        pWal->pFree = 0
+#endif
+        sqlite3_free(frameBuffer)
+    End If
     walUnlockExclusive(pWal, lockIndex, lockCount)
     Return rc
 End Function
@@ -1944,6 +2126,7 @@ Private Function walTryBeginRead CDecl Alias "walTryBeginRead" ( _
        pWal->walIndexData[0] = 0 Then Return SQLITE_CORRUPT
     Dim pInfo As SqliteWalCheckpointInfo Ptr = walCkptInfo(pWal)
     If pInfo = 0 Then Return SQLITE_CORRUPT
+    walSehInjectFault(pWal)
 
     Dim mayIgnoreWal As SQLITE_C_INT = CInt( _
         useWal = 0 AndAlso pInfo->nBackfill = pWal->header.maxFrame)
@@ -1978,6 +2161,7 @@ Private Function walTryBeginRead CDecl Alias "walTryBeginRead" ( _
 #endif
     For readIndex As SQLITE_C_INT = 1 To WAL_NREADER - 1
         Dim thisReadMark As u32 = pInfo->readMark(readIndex)
+        walSehInjectFault(pWal)
         If maximumReadMark <= thisReadMark AndAlso thisReadMark <= maximumFrame Then
             maximumReadMark = thisReadMark
             selectedReadLock = readIndex
@@ -2023,6 +2207,7 @@ Private Function walTryBeginRead CDecl Alias "walTryBeginRead" ( _
     End If
 
     pWal->minFrame = pInfo->nBackfill + 1
+    walSehInjectFault(pWal)
     walShmBarrier(pWal)
     Dim pSharedHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
     If pSharedHeader = 0 OrElse _
@@ -2095,16 +2280,57 @@ Private Function walBeginReadTransaction CDecl Alias "walBeginReadTransaction" (
     Return rc
 End Function
 
+Type SqliteWalBeginReadSehContext
+    pWal As SqliteWal Ptr
+    pChanged As SQLITE_C_INT Ptr
+End Type
+
+Private Function walBeginReadSehWork CDecl Alias "walBeginReadSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalBeginReadSehContext Ptr = _
+        CPtr(SqliteWalBeginReadSehContext Ptr, pContext)
+    Return walBeginReadTransaction(callContext->pWal, callContext->pChanged)
+End Function
+
 Function sqlite3WalBeginReadTransaction CDecl Alias "sqlite3WalBeginReadTransaction" ( _
     ByVal pWal As Any Ptr, _
     ByVal pChanged As SQLITE_C_INT Ptr _
 ) As SQLITE_C_INT
+    If pWal = 0 OrElse pChanged = 0 Then Return SQLITE_MISUSE
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    Dim pWalState As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWal)
+    Dim callContext As SqliteWalBeginReadSehContext
+    callContext.pWal = pWalState
+    callContext.pChanged = pChanged
+#ifdef SQLITE_USE_SEH
+    Return walRunSeh(pWalState, @callContext, @walBeginReadSehWork, _
+                     @walSehCatchHandle)
+#else
+    Return walRunSeh(pWalState, @callContext, @walBeginReadSehWork, _
+                     @walSehCatchIoerr)
+#endif
+#else
     Return walBeginReadTransaction(pWal, pChanged)
+#endif
 End Function
 
 ' ---------------------------------------------------------------------------
 ' WAL write transactions
 ' ---------------------------------------------------------------------------
+
+Private Function walBeginWriteSehWork CDecl Alias "walBeginWriteSehWork" ( _
+    ByVal pWalArgument As Any Ptr _
+) As SQLITE_C_INT
+    If pWalArgument = 0 Then Return SQLITE_MISUSE
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+    Dim pSharedHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
+    If pSharedHeader = 0 Then Return SQLITE_CORRUPT
+    If walSystemMemcmp(@pWal->header, pSharedHeader, SizeOf(pWal->header)) <> 0 Then _
+        Return SQLITE_BUSY_SNAPSHOT
+    Return SQLITE_OK
+End Function
 
 Function sqlite3WalBeginWriteTransaction CDecl Alias "sqlite3WalBeginWriteTransaction" ( _
     ByVal pWalArgument As Any Ptr _
@@ -2114,24 +2340,29 @@ Function sqlite3WalBeginWriteTransaction CDecl Alias "sqlite3WalBeginWriteTransa
     If pWal->readLock < 0 Then Return SQLITE_MISUSE
     If pWal->readOnly <> 0 Then Return SQLITE_READONLY
 
-    Dim pSharedHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
-    If pSharedHeader = 0 Then Return SQLITE_CORRUPT
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
     If pWal->writeLock <> 0 Then
+        If pWal->walIndexDataCount <= 0 OrElse pWal->walIndexData = 0 OrElse _
+           pWal->walIndexData[0] = 0 Then Return SQLITE_CORRUPT
+        Dim pSharedHeader As SqliteWalIndexHeader Ptr = _
+            CPtr(SqliteWalIndexHeader Ptr, pWal->walIndexData[0])
         If walSystemMemcmp(@pWal->header, pSharedHeader, SizeOf(pWal->header)) = 0 Then _
             Return SQLITE_OK
         Return SQLITE_BUSY_SNAPSHOT
     End If
+#else
+    If pWal->writeLock <> 0 Then Return SQLITE_MISUSE
+#endif
 
     Dim rc As SQLITE_C_INT = walLockExclusive(pWal, WAL_WRITE_LOCK, 1)
     If rc <> SQLITE_OK Then Return rc
     pWal->writeLock = 1
 
-    pSharedHeader = walIndexHdr(pWal)
-    If pSharedHeader = 0 Then
-        rc = SQLITE_CORRUPT
-    ElseIf walSystemMemcmp(@pWal->header, pSharedHeader, SizeOf(pWal->header)) <> 0 Then
-        rc = SQLITE_BUSY_SNAPSHOT
-    End If
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    rc = walRunSeh(pWal, pWal, @walBeginWriteSehWork, @walSehCatchIoerr)
+#else
+    rc = walBeginWriteSehWork(pWal)
+#endif
 
     If rc <> SQLITE_OK Then
         walUnlockExclusive(pWal, WAL_WRITE_LOCK, 1)
@@ -2490,6 +2721,26 @@ Private Function walFrames CDecl Alias "walFrames" ( _
     Return rc
 End Function
 
+Type SqliteWalFramesSehContext
+    pWal As SqliteWal Ptr
+    pageSize As SQLITE_C_INT
+    pList As PgHdr Ptr
+    truncatePages As u32
+    isCommit As SQLITE_C_INT
+    syncFlags As SQLITE_C_INT
+End Type
+
+Private Function walFramesSehWork CDecl Alias "walFramesSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalFramesSehContext Ptr = _
+        CPtr(SqliteWalFramesSehContext Ptr, pContext)
+    Return walFrames(callContext->pWal, callContext->pageSize, _
+        callContext->pList, callContext->truncatePages, _
+        callContext->isCommit, callContext->syncFlags)
+End Function
+
 Function sqlite3WalFrames CDecl Alias "sqlite3WalFrames" ( _
     ByVal pWal As Any Ptr, _
     ByVal pageSize As SQLITE_C_INT, _
@@ -2499,8 +2750,25 @@ Function sqlite3WalFrames CDecl Alias "sqlite3WalFrames" ( _
     ByVal syncFlags As SQLITE_C_INT _
 ) As SQLITE_C_INT
     If pWal = 0 Then Return SQLITE_MISUSE
-    Return walFrames(CPtr(SqliteWal Ptr, pWal), pageSize, pList, _
-                     truncatePages, isCommit, syncFlags)
+    Dim pWalState As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWal)
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    Dim callContext As SqliteWalFramesSehContext
+    callContext.pWal = pWalState
+    callContext.pageSize = pageSize
+    callContext.pList = pList
+    callContext.truncatePages = truncatePages
+    callContext.isCommit = isCommit
+    callContext.syncFlags = syncFlags
+#ifdef SQLITE_USE_SEH
+    Return walRunSeh(pWalState, @callContext, @walFramesSehWork, _
+                     @walSehCatchHandle)
+#else
+    Return walRunSeh(pWalState, @callContext, @walFramesSehWork, _
+                     @walSehCatchIoerr)
+#endif
+#else
+    Return walFrames(pWalState, pageSize, pList, truncatePages, isCommit, syncFlags)
+#endif
 End Function
 
 Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
@@ -2530,6 +2798,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
         If pageSize <= 0 OrElse pBuffer = 0 Then Return SQLITE_MISUSE
         For readIndex As SQLITE_C_INT = 1 To WAL_NREADER - 1
             Dim readMark As u32 = pInfo->readMark(readIndex)
+            walSehInjectFault(pWal)
             If safeFrame > readMark Then
                 rc = walBusyLock(pWal, xBusy, pBusyArgument, _
                     WAL_READ_LOCK_BASE + readIndex, 1)
@@ -2539,6 +2808,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
                     Else
                         pInfo->readMark(readIndex) = READMARK_NOT_USED
                     End If
+                    walSehInjectFault(pWal)
                     walShmBarrier(pWal)
                     walUnlockExclusive(pWal, WAL_READ_LOCK_BASE + readIndex, 1)
                 ElseIf rc = SQLITE_BUSY Then
@@ -2555,6 +2825,9 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
     If pInfo->nBackfill < safeFrame Then
         rc = walIteratorInit(pWal, pInfo->nBackfill, @pIterator)
         If rc <> SQLITE_OK Then GoTo checkpoint_cleanup
+#ifdef SQLITE_USE_SEH
+        If pIterator <> 0 Then pWal->pFree = pIterator
+#endif
     End If
 
     If pIterator <> 0 Then
@@ -2567,6 +2840,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
             ElseIf walSystemMemcmp(@pLiveHeader->salt(0), _
                     @pWal->header.salt(0), SizeOf(pWal->header.salt)) = 0 Then
                 pInfo->nBackfillAttempted = safeFrame
+                walSehInjectFault(pWal)
                 walShmBarrier(pWal)
 
                 rc = sqlite3OsSync(pWal->pWalFile, CKPT_SYNC_FLAGS(syncFlags))
@@ -2601,6 +2875,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
                         rc = iteratorResult
                         Exit While
                     End If
+                    walSehInjectFault(pWal)
                     If walFramePgno(pWal, frameNumber) <> pageNumber Then
                         rc = SQLITE_CORRUPT
                         Exit While
@@ -2642,6 +2917,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
                     End If
                     If rc = SQLITE_OK Then
                         pInfo->nBackfill = safeFrame
+                        walSehInjectFault(pWal)
                         walShmBarrier(pWal)
                     End If
                 End If
@@ -2652,6 +2928,7 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
     If rc = SQLITE_BUSY Then rc = SQLITE_OK
 
     If rc = SQLITE_OK AndAlso mode <> SQLITE_CHECKPOINT_PASSIVE Then
+        walSehInjectFault(pWal)
         If pInfo->nBackfill < pWal->header.maxFrame Then
             rc = SQLITE_BUSY
         ElseIf mode >= SQLITE_CHECKPOINT_RESTART Then
@@ -2670,7 +2947,82 @@ Private Function walCheckpoint CDecl Alias "walCheckpoint" ( _
     End If
 
 checkpoint_cleanup:
+#ifdef SQLITE_USE_SEH
+    If pWal->pFree = pIterator Then pWal->pFree = 0
+#endif
     walIteratorFree(pIterator)
+    Return rc
+End Function
+
+Type SqliteWalCheckpointSehContext
+    pWal As SqliteWal Ptr
+    pDb As sqlite3 Ptr
+    result As SQLITE_C_INT
+    changed As SQLITE_C_INT
+    effectiveMode As SQLITE_C_INT
+    effectiveBusy As SqliteWalBusyCallback
+    pBusyArgument As Any Ptr
+    syncFlags As SQLITE_C_INT
+    bufferSize As SQLITE_C_INT
+    pBuffer As UByte Ptr
+    pLogFrames As SQLITE_C_INT Ptr
+    pCheckpointedFrames As SQLITE_C_INT Ptr
+End Type
+
+Private Function walCheckpointSehWork CDecl Alias "walCheckpointSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalCheckpointSehContext Ptr = _
+        CPtr(SqliteWalCheckpointSehContext Ptr, pContext)
+    Dim pWal As SqliteWal Ptr = callContext->pWal
+    Dim pDb As sqlite3 Ptr = callContext->pDb
+    Dim rc As SQLITE_C_INT = callContext->result
+
+    If rc = SQLITE_OK Then
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+        walDisableBlocking(pWal)
+#endif
+        rc = walIndexReadHdr(pWal, @callContext->changed)
+#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
+        If callContext->effectiveMode > SQLITE_CHECKPOINT_PASSIVE Then _
+            walEnableBlocking(pWal)
+#endif
+        If callContext->changed <> 0 AndAlso _
+           pWal->pDbFile <> 0 AndAlso pWal->pDbFile->pMethods <> 0 AndAlso _
+           pWal->pDbFile->pMethods->iVersion >= 3 Then
+            sqlite3OsUnfetch(pWal->pDbFile, 0, 0)
+        End If
+    End If
+
+    If rc = SQLITE_OK Then
+        sqlite3FaultSim(660)
+        If pWal->header.maxFrame <> 0 AndAlso _
+           walPagesize(pWal) <> callContext->bufferSize Then
+            rc = SQLITE_CORRUPT
+        ElseIf callContext->effectiveMode <> SQLITE_CHECKPOINT_NOOP Then
+            rc = walCheckpoint(pWal, pDb, callContext->effectiveMode, _
+                callContext->effectiveBusy, callContext->pBusyArgument, _
+                callContext->syncFlags, callContext->pBuffer)
+        End If
+        If rc = SQLITE_OK OrElse rc = SQLITE_BUSY Then
+            If callContext->pLogFrames <> 0 Then _
+                callContext->pLogFrames[0] = _
+                    Cast(SQLITE_C_INT, pWal->header.maxFrame)
+            walSehInjectFault(pWal)
+            If callContext->pCheckpointedFrames <> 0 Then
+                Dim pInfo As SqliteWalCheckpointInfo Ptr = walCkptInfo(pWal)
+                If pInfo = 0 Then
+                    rc = SQLITE_CORRUPT
+                Else
+                    callContext->pCheckpointedFrames[0] = _
+                        Cast(SQLITE_C_INT, pInfo->nBackfill)
+                End If
+            End If
+        End If
+    End If
+
+    callContext->result = rc
     Return rc
 End Function
 
@@ -2721,41 +3073,31 @@ Function sqlite3WalCheckpoint CDecl Alias "sqlite3WalCheckpoint" ( _
         End If
     End If
 
-    Dim changed As SQLITE_C_INT = 0
-    If rc = SQLITE_OK Then
-#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
-        walDisableBlocking(pWal)
+    Dim callContext As SqliteWalCheckpointSehContext
+    callContext.pWal = pWal
+    callContext.pDb = pDb
+    callContext.result = rc
+    callContext.changed = 0
+    callContext.effectiveMode = effectiveMode
+    callContext.effectiveBusy = effectiveBusy
+    callContext.pBusyArgument = pBusyArgument
+    callContext.syncFlags = syncFlags
+    callContext.bufferSize = bufferSize
+    callContext.pBuffer = pBuffer
+    callContext.pLogFrames = pLogFrames
+    callContext.pCheckpointedFrames = pCheckpointedFrames
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+#ifdef SQLITE_USE_SEH
+    rc = walRunSeh(pWal, @callContext, @walCheckpointSehWork, _
+                   @walSehCatchHandle)
+#else
+    rc = walRunSeh(pWal, @callContext, @walCheckpointSehWork, _
+                   @walSehCatchIoerr)
 #endif
-        rc = walIndexReadHdr(pWal, @changed)
-#ifdef SQLITE_ENABLE_SETLK_TIMEOUT
-        If effectiveMode > SQLITE_CHECKPOINT_PASSIVE Then walEnableBlocking(pWal)
+#else
+    rc = walCheckpointSehWork(@callContext)
 #endif
-        If changed <> 0 AndAlso pWal->pDbFile <> 0 AndAlso _
-           pWal->pDbFile->pMethods <> 0 AndAlso pWal->pDbFile->pMethods->iVersion >= 3 Then
-            sqlite3OsUnfetch(pWal->pDbFile, 0, 0)
-        End If
-    End If
-
-    If rc = SQLITE_OK Then
-        sqlite3FaultSim(660)
-        If pWal->header.maxFrame <> 0 AndAlso walPagesize(pWal) <> bufferSize Then
-            rc = SQLITE_CORRUPT
-        ElseIf effectiveMode <> SQLITE_CHECKPOINT_NOOP Then
-            rc = walCheckpoint(pWal, pDb, effectiveMode, effectiveBusy, _
-                pBusyArgument, syncFlags, pBuffer)
-        End If
-        If rc = SQLITE_OK OrElse rc = SQLITE_BUSY Then
-            If pLogFrames <> 0 Then pLogFrames[0] = Cast(SQLITE_C_INT, pWal->header.maxFrame)
-            If pCheckpointedFrames <> 0 Then
-                Dim pInfo As SqliteWalCheckpointInfo Ptr = walCkptInfo(pWal)
-                If pInfo = 0 Then
-                    rc = SQLITE_CORRUPT
-                Else
-                    pCheckpointedFrames[0] = Cast(SQLITE_C_INT, pInfo->nBackfill)
-                End If
-            End If
-        End If
-    End If
+    Dim changed As SQLITE_C_INT = callContext.changed
 
     If changed <> 0 Then walClearIndexHeader(pWal)
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
@@ -2774,6 +3116,46 @@ Function sqlite3WalCheckpoint CDecl Alias "sqlite3WalCheckpoint" ( _
     Return rc
 End Function
 
+Type SqliteWalUndoSehContext
+    pWal As SqliteWal Ptr
+    maximumFrame As u32
+    xUndo As SqliteWalUndoProc
+    pUndoContext As Any Ptr
+End Type
+
+Private Function walUndoSehWork CDecl Alias "walUndoSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalUndoSehContext Ptr = _
+        CPtr(SqliteWalUndoSehContext Ptr, pContext)
+    Dim pWal As SqliteWal Ptr = callContext->pWal
+    Dim pSharedHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
+    If pSharedHeader = 0 Then Return SQLITE_CORRUPT
+    pWal->header = pSharedHeader[0]
+
+    Dim result As SQLITE_C_INT = SQLITE_OK
+    If pWal->header.maxFrame < callContext->maximumFrame Then
+        If pWal->header.maxFrame = &HFFFFFFFFUL Then Return SQLITE_CORRUPT
+        Dim frameIndex As u32 = pWal->header.maxFrame + 1
+        While frameIndex <= callContext->maximumFrame
+            Dim pageNumber As u32 = walFramePgno(pWal, frameIndex)
+            If pageNumber = 0 Then Return SQLITE_CORRUPT
+            Dim rc As SQLITE_C_INT = callContext->xUndo( _
+                callContext->pUndoContext, pageNumber)
+            If rc <> SQLITE_OK Then
+                result = rc
+                Exit While
+            End If
+            If frameIndex = &HFFFFFFFFUL Then Exit While
+            frameIndex += 1
+        Wend
+        If callContext->maximumFrame <> pWal->header.maxFrame Then _
+            walCleanupHash(pWal)
+    End If
+    Return result
+End Function
+
 Function sqlite3WalUndo CDecl Alias "sqlite3WalUndo" ( _
     ByVal pWalArgument As Any Ptr, _
     ByVal xUndo As SqliteWalUndoProc, _
@@ -2782,25 +3164,17 @@ Function sqlite3WalUndo CDecl Alias "sqlite3WalUndo" ( _
     If pWalArgument = 0 OrElse xUndo = 0 Then Return SQLITE_MISUSE
     Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
     If pWal->writeLock = 0 Then Return SQLITE_MISUSE
-    Dim pSharedHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
-    If pSharedHeader = 0 Then Return SQLITE_CORRUPT
-    Dim maximumFrame As u32 = pWal->header.maxFrame
-    pWal->header = pSharedHeader[0]
-
-    Dim rc As SQLITE_C_INT = SQLITE_OK
-    If pWal->header.maxFrame < maximumFrame Then
-        If pWal->header.maxFrame = &HFFFFFFFFUL Then Return SQLITE_CORRUPT
-        Dim frameIndex As u32 = pWal->header.maxFrame + 1
-        While frameIndex <= maximumFrame
-            Dim pageNumber As u32 = walFramePgno(pWal, frameIndex)
-            If pageNumber = 0 Then Return SQLITE_CORRUPT
-            rc = xUndo(pUndoContext, pageNumber)
-            If rc <> SQLITE_OK Then Exit While
-            If frameIndex = &HFFFFFFFFUL Then Exit While
-            frameIndex += 1
-        Wend
-        walCleanupHash(pWal)
-    End If
+    Dim callContext As SqliteWalUndoSehContext
+    callContext.pWal = pWal
+    callContext.maximumFrame = pWal->header.maxFrame
+    callContext.xUndo = xUndo
+    callContext.pUndoContext = pUndoContext
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    Dim rc As SQLITE_C_INT = walRunSeh(pWal, @callContext, @walUndoSehWork, _
+                                       @walSehCatchIoerr)
+#else
+    Dim rc As SQLITE_C_INT = walUndoSehWork(@callContext)
+#endif
     pWal->recalculateChecksumFrame = 0
     Return rc
 End Function
@@ -2818,6 +3192,14 @@ Sub sqlite3WalSavepoint CDecl Alias "sqlite3WalSavepoint" ( _
     pWalData[3] = pWal->checkpointSequence
 End Sub
 
+Private Function walSavepointUndoSehWork CDecl Alias "walSavepointUndoSehWork" ( _
+    ByVal pWalArgument As Any Ptr _
+) As SQLITE_C_INT
+    If pWalArgument = 0 Then Return SQLITE_MISUSE
+    walCleanupHash(CPtr(SqliteWal Ptr, pWalArgument))
+    Return SQLITE_OK
+End Function
+
 Function sqlite3WalSavepointUndo CDecl Alias "sqlite3WalSavepointUndo" ( _
     ByVal pWalArgument As Any Ptr, _
     ByVal pWalData As u32 Ptr _
@@ -2834,7 +3216,13 @@ Function sqlite3WalSavepointUndo CDecl Alias "sqlite3WalSavepointUndo" ( _
         pWal->header.maxFrame = pWalData[0]
         pWal->header.frameChecksum(0) = pWalData[1]
         pWal->header.frameChecksum(1) = pWalData[2]
-        walCleanupHash(pWal)
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+        Dim rc As SQLITE_C_INT = walRunSeh(pWal, pWal, _
+            @walSavepointUndoSehWork, @walSehCatchIoerr)
+#else
+        Dim rc As SQLITE_C_INT = walSavepointUndoSehWork(pWal)
+#endif
+        If rc <> SQLITE_OK Then Return rc
         If pWal->recalculateChecksumFrame > pWal->header.maxFrame Then _
             pWal->recalculateChecksumFrame = 0
     End If
@@ -2991,6 +3379,22 @@ Private Function walSnapshotRecover( _
     Return rc
 End Function
 
+Type SqliteWalSnapshotRecoverSehContext
+    pWal As SqliteWal Ptr
+    pWalBuffer As UByte Ptr
+    pDatabaseBuffer As UByte Ptr
+End Type
+
+Private Function walSnapshotRecoverSehWork CDecl Alias "walSnapshotRecoverSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalSnapshotRecoverSehContext Ptr = _
+        CPtr(SqliteWalSnapshotRecoverSehContext Ptr, pContext)
+    Return walSnapshotRecover(callContext->pWal, callContext->pWalBuffer, _
+                              callContext->pDatabaseBuffer)
+End Function
+
 Function sqlite3WalSnapshotRecover CDecl Alias "sqlite3WalSnapshotRecover" ( _
     ByVal pWalArgument As Any Ptr _
 ) As SQLITE_C_INT Export
@@ -3009,7 +3413,16 @@ Function sqlite3WalSnapshotRecover CDecl Alias "sqlite3WalSnapshotRecover" ( _
         rc = SQLITE_NOMEM
     Else
         pWal->checkpointLock = 1
-        rc = walSnapshotRecover(pWal, pWalBuffer, pDatabaseBuffer)
+        Dim callContext As SqliteWalSnapshotRecoverSehContext
+        callContext.pWal = pWal
+        callContext.pWalBuffer = pWalBuffer
+        callContext.pDatabaseBuffer = pDatabaseBuffer
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+        rc = walRunSeh(pWal, @callContext, @walSnapshotRecoverSehWork, _
+                       @walSehCatchIoerr)
+#else
+        rc = walSnapshotRecoverSehWork(@callContext)
+#endif
         pWal->checkpointLock = 0
     End If
 
@@ -3060,14 +3473,19 @@ Sub sqlite3WalSnapshotOpen CDecl Alias "sqlite3WalSnapshotOpen" ( _
     End If
 End Sub
 
-Function sqlite3WalSnapshotCheck CDecl Alias "sqlite3WalSnapshotCheck" ( _
-    ByVal pWalArgument As Any Ptr, _
-    ByVal pSnapshotArgument As Any Ptr _
-) As SQLITE_C_INT Export
-    If pWalArgument = 0 OrElse pSnapshotArgument = 0 Then Return SQLITE_MISUSE
-    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
-    Dim pSnapshot As SqliteWalIndexHeader Ptr = _
-        CPtr(SqliteWalIndexHeader Ptr, pSnapshotArgument)
+Type SqliteWalSnapshotCheckSehContext
+    pWal As SqliteWal Ptr
+    pSnapshot As SqliteWalIndexHeader Ptr
+End Type
+
+Private Function walSnapshotCheckSehWork CDecl Alias "walSnapshotCheckSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalSnapshotCheckSehContext Ptr = _
+        CPtr(SqliteWalSnapshotCheckSehContext Ptr, pContext)
+    Dim pWal As SqliteWal Ptr = callContext->pWal
+    Dim pSnapshot As SqliteWalIndexHeader Ptr = callContext->pSnapshot
     Dim rc As SQLITE_C_INT = walLockShared(pWal, WAL_CKPT_LOCK)
     If rc <> SQLITE_OK Then Return rc
 
@@ -3081,6 +3499,28 @@ Function sqlite3WalSnapshotCheck CDecl Alias "sqlite3WalSnapshotCheck" ( _
     End If
     If rc <> SQLITE_OK Then walUnlockShared(pWal, WAL_CKPT_LOCK)
     Return rc
+End Function
+
+Function sqlite3WalSnapshotCheck CDecl Alias "sqlite3WalSnapshotCheck" ( _
+    ByVal pWalArgument As Any Ptr, _
+    ByVal pSnapshotArgument As Any Ptr _
+) As SQLITE_C_INT Export
+    If pWalArgument = 0 OrElse pSnapshotArgument = 0 Then Return SQLITE_MISUSE
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+    Dim callContext As SqliteWalSnapshotCheckSehContext
+    callContext.pWal = pWal
+    callContext.pSnapshot = CPtr(SqliteWalIndexHeader Ptr, pSnapshotArgument)
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+#ifdef SQLITE_USE_SEH
+    Return walRunSeh(pWal, @callContext, @walSnapshotCheckSehWork, _
+                     @walSehCatchHandle)
+#else
+    Return walRunSeh(pWal, @callContext, @walSnapshotCheckSehWork, _
+                     @walSehCatchIoerr)
+#endif
+#else
+    Return walSnapshotCheckSehWork(@callContext)
+#endif
 End Function
 
 Sub sqlite3WalSnapshotUnlock CDecl Alias "sqlite3WalSnapshotUnlock" ( _
@@ -3118,16 +3558,22 @@ Private Sub walIndexHdrStat( _
     sqlite3_str_appendf(pStr, StrPtr(!",nPage:%u"), pHeader->pageCount)
 End Sub
 
-Sub sqlite3WalStat CDecl Alias "sqlite3WalStat" ( _
-    ByVal pWalArgument As Any Ptr, _
-    ByVal pStrArgument As Any Ptr _
-)
-    If pWalArgument = 0 OrElse pStrArgument = 0 Then Return
-    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
-    Dim pStr As sqlite3_str Ptr = CPtr(sqlite3_str Ptr, pStrArgument)
+Type SqliteWalStatSehContext
+    pWal As SqliteWal Ptr
+    pStr As sqlite3_str Ptr
+End Type
+
+Private Function walStatSehWork CDecl Alias "walStatSehWork" ( _
+    ByVal pContext As Any Ptr _
+) As SQLITE_C_INT
+    If pContext = 0 Then Return SQLITE_MISUSE
+    Dim callContext As SqliteWalStatSehContext Ptr = _
+        CPtr(SqliteWalStatSehContext Ptr, pContext)
+    Dim pWal As SqliteWal Ptr = callContext->pWal
+    Dim pStr As sqlite3_str Ptr = callContext->pStr
     Dim pInfo As SqliteWalCheckpointInfo Ptr = walCkptInfo(pWal)
     Dim pHeader As SqliteWalIndexHeader Ptr = walIndexHdr(pWal)
-    If pInfo = 0 OrElse pHeader = 0 Then Return
+    If pInfo = 0 OrElse pHeader = 0 Then Return SQLITE_CORRUPT
 
     sqlite3_str_appendf(pStr, StrPtr(!"hdr0:{"))
     walIndexHdrStat(pHeader, pStr)
@@ -3142,6 +3588,23 @@ Sub sqlite3WalStat CDecl Alias "sqlite3WalStat" ( _
     sqlite3_str_appendf(pStr, StrPtr(!",nWiData:%d"), pWal->walIndexDataCount)
     sqlite3_str_appendf(pStr, StrPtr(!",readLock:%d"), pWal->readLock)
     sqlite3_str_appendf(pStr, StrPtr(!",minFrame:%u"), pWal->minFrame)
+    Return SQLITE_OK
+End Function
+
+Sub sqlite3WalStat CDecl Alias "sqlite3WalStat" ( _
+    ByVal pWalArgument As Any Ptr, _
+    ByVal pStrArgument As Any Ptr _
+)
+    If pWalArgument = 0 OrElse pStrArgument = 0 Then Return
+    Dim pWal As SqliteWal Ptr = CPtr(SqliteWal Ptr, pWalArgument)
+    Dim callContext As SqliteWalStatSehContext
+    callContext.pWal = pWal
+    callContext.pStr = CPtr(sqlite3_str Ptr, pStrArgument)
+#if defined(SQLITE_USE_SEH) OrElse defined(SQLITE_DEBUG)
+    walRunSeh(pWal, @callContext, @walStatSehWork, @walSehCatchIgnore)
+#else
+    walStatSehWork(@callContext)
+#endif
 End Sub
 #endif
 #endif

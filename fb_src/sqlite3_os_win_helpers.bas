@@ -362,24 +362,21 @@ Declare Function winDefaultWinAreFileApisANSI StdCall Lib "kernel32" _
     Alias "AreFileApisANSI" () As SQLITE_C_INT
 Declare Sub winDefaultWinSleepMilliseconds StdCall Lib "kernel32" _
     Alias "Sleep" (ByVal milliseconds As SQLITE_C_UINT)
+Declare Function winDefaultWinInterlockedCompareExchange StdCall Lib "kernel32" _
+    Alias "InterlockedCompareExchange" ( _
+    ByVal pTarget As SQLITE_C_INT Ptr, _
+    ByVal exchangeValue As SQLITE_C_INT, _
+    ByVal comparand As SQLITE_C_INT _
+) As SQLITE_C_INT
 Function sqlite3WinInterlockedCompareExchange CDecl _
 Alias "sqlite3WinInterlockedCompareExchange" ( _
     ByVal pTarget As SQLITE_C_INT Ptr, _
     ByVal exchangeValue As SQLITE_C_INT, _
     ByVal comparand As SQLITE_C_INT _
 ) As SQLITE_C_INT
-    Dim priorValue As SQLITE_C_INT = comparand
-#if __FB_ASM__ = "att"
-    ' Windows exposes this operation as a compiler intrinsic, not an import
-    ' from kernel32 on MinGW. Keep both the memory update and compiler fence
-    ' inside one atomic instruction with the ABI-provided expected value.
-    Asm
-        "lock; cmpxchgl %2, %1" : "+a" (priorValue), "+m" (*pTarget) : "r" (exchangeValue) : "cc", "memory"
-    End Asm
-#else
-    #error "Windows atomic compare-exchange requires the AT&T asm dialect"
-#endif
-    Return priorValue
+    ' Match SQLite's Win32 syscall-table slot and its full memory barrier.
+    Return winDefaultWinInterlockedCompareExchange( _
+        pTarget, exchangeValue, comparand)
 End Function
 Private Function winDefaultWinMemoryBarrierCompareExchange CDecl _
 Alias "winDefaultWinMemoryBarrierCompareExchange" ( _
@@ -4102,7 +4099,7 @@ Private Function winOpenSharedMemory( _
     Return SQLITE_OK
 End Function
 
-Private Function winShmMap( _
+Private Function winShmMap CDecl ( _
     ByVal pFile As sqlite3_file Ptr, _
     ByVal regionIndex As SQLITE_C_INT, _
     ByVal regionBytes As SQLITE_C_INT, _

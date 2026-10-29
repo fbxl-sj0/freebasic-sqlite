@@ -2469,7 +2469,7 @@ Private Function multiSelect CDecl Alias "multiSelect" (ByVal arg0 As SqlitePars
     c2fb_temp_41 = Cast(SQLITE_C_INT, local3.iSDParm2)
     (*c2fb_temp_40) = c2fb_temp_41
     If local4 Then
-        c2fb_temp_42 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), ProcPtr(sqlite3SelectDeleteGeneric), CPtr(Any Ptr, local4)))
+        c2fb_temp_42 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3SelectDeleteGeneric)), CPtr(Any Ptr, local4)))
     End If
     Return local0
 End Function
@@ -3299,7 +3299,7 @@ Private Function multiSelectByMerge CDecl Alias "multiSelectByMerge" (ByVal arg0
     ' empty C statement
     sqlite3VdbeResolveLabel(local5, local28)
     If local3->pPrior Then
-        c2fb_temp_121 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), ProcPtr(sqlite3SelectDeleteGeneric), CPtr(Any Ptr, local3->pPrior)))
+        c2fb_temp_121 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3SelectDeleteGeneric)), CPtr(Any Ptr, local3->pPrior)))
     End If
     c2fb_temp_122 = CPtr(SqliteSelect Ptr Ptr, @(local3->pPrior))
     c2fb_temp_123 = local2

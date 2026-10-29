@@ -1124,8 +1124,8 @@ Sub sqlite3BeginTrigger CDecl Alias "sqlite3BeginTrigger" (ByVal arg0 As SqliteP
     Goto c2fb_label_0
 End Sub
 
-#ifdef SQLITE_DEBUG
-Private Function onErrorText CDecl Alias "onErrorText" ( _
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+Function onErrorText CDecl Alias "onErrorText" ( _
     ByVal conflictAction As SQLITE_C_INT _
 ) As Const ZString Ptr
     Select Case conflictAction

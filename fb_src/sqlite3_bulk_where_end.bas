@@ -1222,7 +1222,9 @@ Sub sqlite3WhereEnd CDecl Alias "sqlite3WhereEnd" (ByVal arg0 As SqliteWhereInfo
         End If
         If Cast(SQLITE_C_INT, ((Cast(SQLITE_C_UINT, local5->a(local3->iFrom).fg.flags) Shr 18) And Cast(SQLITE_C_UINT, &H1ULL))) Then
             sqlite3VdbeAddOp2(local1, Cast(SQLITE_C_INT, 9ULL), Cast(SQLITE_C_INT, &O0ULL), local3->addrBrk)
-            ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            sqlite3VdbeComment(local1, StrPtr("EXISTS break %d"), local2)
+#endif
         End If
         sqlite3VdbeResolveLabel(local1, local3->addrCont)
         If (-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_INT, local3->op) <> Cast(SQLITE_C_INT, 189ULL))))) Then

@@ -988,11 +988,11 @@ Sub sqlite3ComputeGeneratedColumns CDecl Alias "sqlite3ComputeGeneratedColumns" 
     Dim c2fb_temp_13 As Any Ptr Ptr
     Dim c2fb_temp_14 As SqliteTable Ptr
     Dim c2fb_temp_15 As SqliteWalkerExprCallback Ptr
-    Dim c2fb_temp_16 As Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT
+    Dim c2fb_temp_16 As SqliteWalkerExprCallback
     Dim c2fb_temp_17 As SqliteWalkerSelectCallback Ptr
-    Dim c2fb_temp_18 As Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT
+    Dim c2fb_temp_18 As SqliteWalkerSelectCallback
     Dim c2fb_temp_19 As SqliteWalkerSelectCallback2 Ptr
-    Dim c2fb_temp_20 As Sub CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr)
+    Dim c2fb_temp_20 As SqliteWalkerSelectCallback2
     Dim c2fb_temp_21 As SQLITE_C_INT Ptr
     Dim c2fb_temp_22 As SQLITE_C_INT
     Dim c2fb_temp_23 As SQLITE_C_INT
@@ -1082,15 +1082,15 @@ Sub sqlite3ComputeGeneratedColumns CDecl Alias "sqlite3ComputeGeneratedColumns" 
     (*c2fb_temp_13) = c2fb_temp_14
     c2fb_temp_14 = (*c2fb_temp_13)
     c2fb_temp_15 = @(local1.xExprCallback)
-    c2fb_temp_16 = CPtr(Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT, ProcPtr(exprColumnFlagUnion))
+    c2fb_temp_16 = CPtr(SqliteWalkerExprCallback, ProcPtr(exprColumnFlagUnion))
     (*c2fb_temp_15) = c2fb_temp_16
     c2fb_temp_16 = (*c2fb_temp_15)
     c2fb_temp_17 = @(local1.xSelectCallback)
-    c2fb_temp_18 = CPtr(Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT, Cast(Integer, Cast(SQLITE_C_INT, &O0ULL)))
+    c2fb_temp_18 = 0
     (*c2fb_temp_17) = c2fb_temp_18
     c2fb_temp_18 = (*c2fb_temp_17)
     c2fb_temp_19 = @(local1.xSelectCallback2)
-    c2fb_temp_20 = CPtr(Sub CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr), Cast(Integer, Cast(SQLITE_C_INT, &O0ULL)))
+    c2fb_temp_20 = 0
     (*c2fb_temp_19) = c2fb_temp_20
     c2fb_temp_20 = (*c2fb_temp_19)
     c2fb_temp_21 = @(arg0->iSelfTab)

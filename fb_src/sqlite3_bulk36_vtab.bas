@@ -1227,6 +1227,10 @@ Function sqlite3_drop_modules CDecl Alias "sqlite3_drop_modules" (ByVal arg0 As 
     Dim c2fb_temp_3 As SQLITE_C_INT
     Dim c2fb_temp_4 As SQLITE_C_INT
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return SQLITE_MISUSE
+#endif
+
     ' C automatic storage declaration
     ' C automatic storage declaration
     sqlite3_mutex_enter(arg0->mutex)

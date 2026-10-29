@@ -727,7 +727,7 @@ Function sqlite3InitCallback CDecl Alias "sqlite3InitCallback" (ByVal arg0 As An
     End If
     If (-Cast(SQLITE_C_INT, ((local0->pzErrMsg[Cast(SQLITE_C_INT, &O0ULL)] = Cast(SQLITE_C_INT, &O0ULL))))) Then
         local8 = local1->aDb(local2).pSchema
-        If (-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_UINT, (Cast(SQLITE_C_UINT, (local8->tblHash.count + local8->idxHash.count)) + local8->trigHash.count)) > Cast(SQLITE_C_UINT, local1->aLimit(Cast(SQLITE_C_INT, 13ULL))))))) Then
+        If (-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_UINT, (Cast(SQLITE_C_UINT, (local8->tblHash.count + local8->idxHash.count)) + local8->trigHash.count)) > Cast(SQLITE_C_UINT, local1->aLimit(SQLITE_LIMIT_SCHEMA)))))) Then
             c2fb_temp_20 = @((*local0->pzErrMsg))
             c2fb_temp_21 = CPtr(ZString Ptr, sqlite3MPrintf(CPtr(Any Ptr, local1), StrPtr(!"too many schema objects")))
             (*c2fb_temp_20) = c2fb_temp_21

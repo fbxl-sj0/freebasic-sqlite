@@ -825,6 +825,9 @@ Declare Function sqlite3_vtab_on_conflict CDecl Alias "sqlite3_vtab_on_conflict"
 /' end of vtab_preprocessed_candidates.bas '/
 
 Function sqlite3_vtab_on_conflict CDecl Alias "sqlite3_vtab_on_conflict" (ByVal arg0 As sqlite3 Ptr) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return SQLITE_MISUSE
+#endif
     Static local0(0 To 4) As UByte = {Cast(UByte, Cast(SQLITE_C_INT, 1ULL)), Cast(UByte, Cast(SQLITE_C_INT, 4ULL)), Cast(UByte, Cast(SQLITE_C_INT, 3ULL)), Cast(UByte, Cast(SQLITE_C_INT, 2ULL)), Cast(UByte, Cast(SQLITE_C_INT, 5ULL))}
 
     ' C static constant array storage

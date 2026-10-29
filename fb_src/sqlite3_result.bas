@@ -269,7 +269,8 @@ Sub sqlite3_result_subtype CDecl Alias "sqlite3_result_subtype" ( _
     Dim pResult As SqliteResultContext Ptr = sqlite3ResultContext(pContext)
     If pResult = 0 Then Return
 
-#if defined(SQLITE_STRICT_SUBTYPE) AndAlso SQLITE_STRICT_SUBTYPE + 0 <> 0
+#ifdef SQLITE_STRICT_SUBTYPE
+#if SQLITE_STRICT_SUBTYPE + 0 <> 0
     Dim pFunction As SqliteFuncDef Ptr = CPtr(SqliteFuncDef Ptr, pResult->pFunc)
     If pFunction <> 0 AndAlso _
        (pFunction->funcFlags And SQLITE_RESULT_SUBTYPE) = 0 Then
@@ -282,6 +283,7 @@ Sub sqlite3_result_subtype CDecl Alias "sqlite3_result_subtype" ( _
         sqlite3_result_error(pContext, @zError, -1)
         Return
     End If
+#endif
 #endif
 
     pResult->pOut->eSubtype = CByte(subtype And &HFF)

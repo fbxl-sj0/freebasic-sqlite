@@ -1179,8 +1179,8 @@ Private Sub attachFunc CDecl Alias "attachFunc" (ByVal arg0 As SqliteResultConte
             Goto c2fb_label_0
         End If
     Else
-        If (-Cast(SQLITE_C_INT, ((local2->nDb >= Cast(SQLITE_C_INT, (local2->aLimit(Cast(SQLITE_C_INT, 7ULL)) + Cast(SQLITE_C_INT, 2ULL))))))) Then
-            c2fb_temp_13 = CPtr(ZString Ptr, sqlite3MPrintf(CPtr(Any Ptr, local2), StrPtr(!"too many attached databases - max %d"), local2->aLimit(Cast(SQLITE_C_INT, 7ULL))))
+        If (-Cast(SQLITE_C_INT, ((local2->nDb >= Cast(SQLITE_C_INT, (local2->aLimit(SQLITE_LIMIT_ATTACHED) + Cast(SQLITE_C_INT, 2ULL))))))) Then
+            c2fb_temp_13 = CPtr(ZString Ptr, sqlite3MPrintf(CPtr(Any Ptr, local2), StrPtr(!"too many attached databases - max %d"), local2->aLimit(SQLITE_LIMIT_ATTACHED)))
             local10 = c2fb_temp_13
             Goto c2fb_label_0
         End If

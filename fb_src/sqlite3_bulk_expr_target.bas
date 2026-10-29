@@ -3622,7 +3622,18 @@ Function sqlite3ExprCodeTarget CDecl Alias "sqlite3ExprCodeTarget" (ByVal arg0 A
             ' C unused-parameter annotation
             ' C unused-parameter annotation
             sqlite3VdbeAddOp2(local0, Cast(SQLITE_C_INT, 159ULL), local48, arg2)
-            ' empty C statement
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            Dim zPseudoTable As Const ZString Ptr = StrPtr("old")
+            If arg1->iTable <> 0 Then zPseudoTable = StrPtr("new")
+            Dim zPseudoColumn As Const ZString Ptr
+            If local47 < 0 Then
+                zPseudoColumn = StrPtr("rowid")
+            Else
+                zPseudoColumn = local46->aCol[local47].zCnName
+            End If
+            sqlite3VdbeComment(local0, StrPtr("r[%d]=%s.%s"), _
+                arg2, zPseudoTable, zPseudoColumn)
+#endif
             If (-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, ((local47 >= Cast(SQLITE_C_INT, &O0ULL))))) AndAlso (-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_INT, local46->aCol[local47].affinity) = Cast(SQLITE_C_INT, &H45ULL))))))))) Then
                 sqlite3VdbeAddOp1(local0, Cast(SQLITE_C_INT, 89ULL), arg2)
             End If

@@ -4764,7 +4764,7 @@ Private Function sessionApplyOneOp CDecl Alias "sessionApplyOneOp" (ByVal arg0 A
     c2fb_sqlite3changeset_op(CPtr(Any Ptr, arg0), CPtr(Const ZString Ptr Ptr, @(local0)), CPtr(c2fb_c_int Ptr, @(local2)), CPtr(c2fb_c_int Ptr, @(local1)), Cast(c2fb_c_int, &O0ULL))
     If (-Cast(c2fb_c_int, ((local1 = Cast(c2fb_c_int, 9ULL))))) Then
         local4 = (IIf(arg0->bPatchset, arg1->abPK, CPtr(UByte Ptr, Cast(Integer, Cast(c2fb_c_int, &O0ULL)))))
-        c2fb_temp_0 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg0), ProcPtr(c2fb_sqlite3changeset_old), local2, local4, CPtr(SqliteVdbe Ptr, arg1->pDelete)))
+        c2fb_temp_0 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg0), CPtr(c2fb_callback_223, ProcPtr(c2fb_sqlite3changeset_old)), local2, local4, CPtr(SqliteVdbe Ptr, arg1->pDelete)))
         local3 = c2fb_temp_0
         If (-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((local3 = Cast(c2fb_c_int, &O0ULL))))) <> 0) AndAlso ((-Cast(c2fb_c_int, ((sqlite3_bind_parameter_count(CPtr(Any Ptr, CPtr(SqliteVdbe Ptr, arg1->pDelete))) > local2)))) <> 0))))) Then
             c2fb_temp_1 = Cast(c2fb_c_int, c2fb_external_sqlite3_bind_int_(CPtr(SqliteVdbe Ptr, arg1->pDelete), Cast(c2fb_c_int, (local2 + Cast(c2fb_c_int, 1ULL))), ((-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((arg5 = Cast(c2fb_c_int, &O0ULL))))) <> 0) OrElse (local4 <> 0))))))))
@@ -4837,7 +4837,7 @@ Private Function sessionApplyOneOp CDecl Alias "sessionApplyOneOp" (ByVal arg0 A
                 End If
             End If
             If (-Cast(c2fb_c_int, ((local3 = Cast(c2fb_c_int, &O0ULL))))) Then
-                c2fb_temp_15 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg0), ProcPtr(c2fb_sqlite3changeset_new), local2, Cast(c2fb_c_int, &O0ULL), CPtr(SqliteVdbe Ptr, arg1->pInsert)))
+                c2fb_temp_15 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg0), CPtr(c2fb_callback_223, ProcPtr(c2fb_sqlite3changeset_new)), local2, Cast(c2fb_c_int, &O0ULL), CPtr(SqliteVdbe Ptr, arg1->pInsert)))
                 local3 = c2fb_temp_15
                 If (-Cast(c2fb_c_int, ((local3 <> Cast(c2fb_c_int, &O0ULL))))) Then
                     Return local3
@@ -4884,7 +4884,7 @@ Private Function sessionApplyOneWithRetry CDecl Alias "sessionApplyOneWithRetry"
                 c2fb_temp_2 = Cast(c2fb_c_int, c2fb_external_sqlite3_exec_(arg0, StrPtr(!"SAVEPOINT replace_op"), Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL)))
                 local2 = c2fb_temp_2
                 If (-Cast(c2fb_c_int, ((local2 = Cast(c2fb_c_int, &O0ULL))))) Then
-                    c2fb_temp_3 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg1), ProcPtr(c2fb_sqlite3changeset_new), arg2->nCol, arg2->abPK, CPtr(SqliteVdbe Ptr, arg2->pDelete)))
+                    c2fb_temp_3 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg1), CPtr(c2fb_callback_223, ProcPtr(c2fb_sqlite3changeset_new)), arg2->nCol, arg2->abPK, CPtr(SqliteVdbe Ptr, arg2->pDelete)))
                     local2 = c2fb_temp_3
                     c2fb_external_sqlite3_bind_int_(CPtr(SqliteVdbe Ptr, arg2->pDelete), Cast(c2fb_c_int, (arg2->nCol + Cast(c2fb_c_int, 1ULL))), Cast(c2fb_c_int, 1ULL))
                 End If
@@ -5117,11 +5117,11 @@ Private Function sessionUpdateToUpdate CDecl Alias "sessionUpdateToUpdate" (ByVa
     sessionPrepareMprintf(CPtr(c2fb_c_int Ptr, @(local2)), arg0, CPtr(SqliteVdbe Ptr Ptr, @(local1)), CPtr(ZString Ptr Ptr, @(arg2->zErr)), StrPtr(!"UPDATE main.\034%w\034 SET %s WHERE %s"), arg1, CPtr(ZString Ptr, local4.aBuf), CPtr(ZString Ptr, local6.aBuf))
     sessionPrepareMprintf(CPtr(c2fb_c_int Ptr, @(local2)), arg0, CPtr(SqliteVdbe Ptr Ptr, @(local0)), CPtr(ZString Ptr Ptr, @(arg2->zErr)), StrPtr(!"UPDATE main.\034%w\034 SET %s WHERE %s"), arg1, CPtr(ZString Ptr, local5.aBuf), CPtr(ZString Ptr, local6.aBuf))
     If (-Cast(c2fb_c_int, ((local2 = Cast(c2fb_c_int, &O0ULL))))) Then
-        c2fb_temp_11 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg3), ProcPtr(c2fb_sqlite3changeset_old), arg2->nCol, arg2->abPK, local1))
+        c2fb_temp_11 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg3), CPtr(c2fb_callback_223, ProcPtr(c2fb_sqlite3changeset_old)), arg2->nCol, arg2->abPK, local1))
         local2 = c2fb_temp_11
     End If
     If (-Cast(c2fb_c_int, ((local2 = Cast(c2fb_c_int, &O0ULL))))) Then
-        c2fb_temp_12 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg3), ProcPtr(c2fb_sqlite3changeset_old), arg2->nCol, arg2->abPK, local0))
+        c2fb_temp_12 = Cast(c2fb_c_int, sessionBindRow(CPtr(Any Ptr, arg3), CPtr(c2fb_callback_223, ProcPtr(c2fb_sqlite3changeset_old)), arg2->nCol, arg2->abPK, local0))
         local2 = c2fb_temp_12
     End If
     c2fb_temp_13 = Cast(c2fb_c_int, Cast(c2fb_c_int, &O0ULL))

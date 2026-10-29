@@ -2834,9 +2834,15 @@ Function sqlite3CodeSubselect CDecl Alias "sqlite3CodeSubselect" ( _
         End If
         destination.nSdst = registerCount
         sqlite3VdbeAddOp3(pVdbe, OP_Null, 0, destination.iSDParm, pParse->nMem)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(pVdbe, StrPtr("Init subquery result"))
+#endif
     Else
         destination.eDest = SRT_Exists
         sqlite3VdbeAddOp2(pVdbe, OP_Integer, 0, destination.iSDParm)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(pVdbe, StrPtr("Init EXISTS result"))
+#endif
     End If
 
     If pSelect->pLimit <> 0 Then

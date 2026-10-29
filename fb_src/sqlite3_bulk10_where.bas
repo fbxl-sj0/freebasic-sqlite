@@ -1514,9 +1514,9 @@ Private Function estLikePatternLength CDecl Alias "estLikePatternLength" (ByVal 
     Dim c2fb_temp_2 As UShort Ptr
     Dim c2fb_temp_3 As UShort
     Dim c2fb_temp_4 As SqliteWalkerExprCallback Ptr
-    Dim c2fb_temp_5 As Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT
+    Dim c2fb_temp_5 As SqliteWalkerExprCallback
     Dim c2fb_temp_6 As SqliteWalkerSelectCallback Ptr
-    Dim c2fb_temp_7 As Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT
+    Dim c2fb_temp_7 As SqliteWalkerSelectCallback
 
     ' C automatic storage declaration
     c2fb_temp_0 = @(local0.u.sz)
@@ -1526,11 +1526,11 @@ Private Function estLikePatternLength CDecl Alias "estLikePatternLength" (ByVal 
     c2fb_temp_3 = Cast(UShort, arg1)
     (*c2fb_temp_2) = c2fb_temp_3
     c2fb_temp_4 = @(local0.xExprCallback)
-    c2fb_temp_5 = CPtr(Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT, ProcPtr(exprNodePatternLengthEst))
+    c2fb_temp_5 = CPtr(SqliteWalkerExprCallback, ProcPtr(exprNodePatternLengthEst))
     (*c2fb_temp_4) = c2fb_temp_5
     c2fb_temp_5 = (*c2fb_temp_4)
     c2fb_temp_6 = @(local0.xSelectCallback)
-    c2fb_temp_7 = CPtr(Function CDecl(ByVal arg0 As SqliteWalker Ptr, ByVal arg1 As Any Ptr) As SQLITE_C_INT, ProcPtr(sqlite3SelectWalkFail))
+    c2fb_temp_7 = CPtr(SqliteWalkerSelectCallback, ProcPtr(sqlite3SelectWalkFail))
     (*c2fb_temp_6) = c2fb_temp_7
     c2fb_temp_7 = (*c2fb_temp_6)
     sqlite3WalkExpr(CPtr(Any Ptr, CPtr(SqliteWalker Ptr, @(local0))), CPtr(Any Ptr, arg0))

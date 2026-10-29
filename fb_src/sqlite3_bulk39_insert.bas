@@ -853,6 +853,9 @@ Sub sqlite3OpenTable CDecl Alias "sqlite3OpenTable" ( _
     If (pTab->tabFlags And TF_WithoutRowid) = 0 Then
         sqlite3VdbeAddOp4Int(v, openOpcode, cursorNumber, pTab->tnum, _
                              databaseIndex, pTab->nNVCol)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(v, StrPtr("%s"), pTab->zName)
+#endif
     Else
         Dim pPrimaryKey As SqliteIndex Ptr = _
             CPtr(SqliteIndex Ptr, sqlite3PrimaryKeyIndex(pTab))
@@ -860,6 +863,9 @@ Sub sqlite3OpenTable CDecl Alias "sqlite3OpenTable" ( _
         sqlite3VdbeAddOp3(v, openOpcode, cursorNumber, pPrimaryKey->tnum, _
                           databaseIndex)
         sqlite3VdbeSetP4KeyInfo(pParse, pPrimaryKey)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(v, StrPtr("%s"), pTab->zName)
+#endif
     End If
 End Sub
 ' c2fb skipped computeIndexAffStr: FreeBASIC body already exists
@@ -1284,6 +1290,9 @@ Function sqlite3OpenTableAndIndices CDecl Alias "sqlite3OpenTableAndIndices" ( _
             sqlite3VdbeAddOp3(v, openOpcode, indexCursor, pIndex->tnum, databaseIndex)
             sqlite3VdbeSetP4KeyInfo(pParse, pIndex)
             sqlite3VdbeChangeP5(v, p5Value)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            sqlite3VdbeComment(v, StrPtr("%s"), pIndex->zName)
+#endif
         End If
         indexNumber += 1
         pIndex = pIndex->pNext

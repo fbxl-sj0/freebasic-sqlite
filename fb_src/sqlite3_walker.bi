@@ -66,17 +66,20 @@
 #define EP_WinFunc &H01000000
 #endif
 
+' The callback signatures name the same pointer types as SQLite's Walker fields.
+Type SqliteWalker As SqliteWalkerRecord
+
 Type SqliteWalkerExprCallback As Function CDecl ( _
-    ByVal pWalker As Any Ptr, _
-    ByVal pExpr As Any Ptr _
+    ByVal pWalker As SqliteWalker Ptr, _
+    ByVal pExpr As SqliteExpr Ptr _
 ) As SQLITE_C_INT
 Type SqliteWalkerSelectCallback As Function CDecl ( _
-    ByVal pWalker As Any Ptr, _
-    ByVal pSelect As Any Ptr _
+    ByVal pWalker As SqliteWalker Ptr, _
+    ByVal pSelect As SqliteSelect Ptr _
 ) As SQLITE_C_INT
 Type SqliteWalkerSelectCallback2 As Sub CDecl ( _
-    ByVal pWalker As Any Ptr, _
-    ByVal pSelect As Any Ptr _
+    ByVal pWalker As SqliteWalker Ptr, _
+    ByVal pSelect As SqliteSelect Ptr _
 )
 
 #ifdef SQLITE_ENABLE_CURSOR_HINTS
@@ -112,7 +115,7 @@ Union SqliteWalkerExtra
     pCheckOnCtx As Any Ptr
 End Union
 
-Type SqliteWalker
+Type SqliteWalkerRecord
     pParse As SqliteParseContext Ptr
     xExprCallback As SqliteWalkerExprCallback
     xSelectCallback As SqliteWalkerSelectCallback

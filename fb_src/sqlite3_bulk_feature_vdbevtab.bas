@@ -1308,7 +1308,11 @@ Private Function bytecodevtabColumn CDecl Alias "bytecodevtabColumn" ( _
     Case 22
         sqlite3_result_text(pContext, pBytecodeCursor->zName, -1, 0)
     Case 23
-        sqlite3_result_int(pContext, CInt(pOpcode->opcode = OP_OpenWrite))
+        If pOpcode->opcode = OP_OpenWrite Then
+            sqlite3_result_int(pContext, 1)
+        Else
+            sqlite3_result_int(pContext, 0)
+        End If
     End Select
     Return SQLITE_OK
 End Function

@@ -842,6 +842,11 @@ Function sqlite3_table_column_metadata CDecl Alias "sqlite3_table_column_metadat
     Dim c2fb_temp_27 As SQLITE_C_INT
     Dim c2fb_temp_28 As SQLITE_C_INT
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg2 = 0 Then _
+        Return SQLITE_MISUSE
+#endif
+
     ' C automatic storage declaration
     local1 = Cast(SQLITE_C_INT, &O0ULL)
     local2 = Cast(SQLITE_C_INT, &O0ULL)

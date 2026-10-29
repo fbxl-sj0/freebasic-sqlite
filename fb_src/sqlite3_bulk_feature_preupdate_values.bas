@@ -791,6 +791,10 @@ Function sqlite3_preupdate_old CDecl Alias "sqlite3_preupdate_old" (ByVal arg0 A
     Dim c2fb_temp_30 As SqliteVdbeMem Ptr Ptr
     Dim c2fb_temp_31 As SqliteVdbeMem Ptr
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If arg0 = 0 OrElse arg2 = 0 Then Return SQLITE_MISUSE
+#endif
+
     ' C automatic storage declaration
     ' C automatic storage declaration
     local2 = Cast(SQLITE_C_INT, &O0ULL)
@@ -945,6 +949,10 @@ Function sqlite3_preupdate_new CDecl Alias "sqlite3_preupdate_new" (ByVal arg0 A
     Dim c2fb_temp_18 As SqliteVdbeMem Ptr
     Dim pRecordCopy As UByte Ptr
     Dim recordCopyBytes As sqlite3_uint64
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If arg0 = 0 OrElse arg2 = 0 Then Return SQLITE_MISUSE
+#endif
 
     ' C automatic storage declaration
     local1 = Cast(SQLITE_C_INT, &O0ULL)

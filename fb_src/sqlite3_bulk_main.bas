@@ -848,6 +848,9 @@ Function sqlite3_wal_autocheckpoint CDecl Alias "sqlite3_wal_autocheckpoint" (By
     ' SQLite preserves this API as a successful no-op without WAL support.
     Return SQLITE_OK
 #else
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return SQLITE_MISUSE
+#endif
     Dim c2fb_temp_0 As Any Ptr
     Dim c2fb_temp_1 As Any Ptr
 
@@ -953,6 +956,10 @@ Function sqlite3_file_control CDecl Alias "sqlite3_file_control" (ByVal arg0 As 
     Dim c2fb_temp_19 As SQLITE_C_INT
     Dim c2fb_temp_20 As SQLITE_C_INT Ptr
     Dim c2fb_temp_21 As SQLITE_C_INT
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return SQLITE_MISUSE
+#endif
 
     local0 = Cast(SQLITE_C_INT, 1ULL)
     ' C automatic storage declaration

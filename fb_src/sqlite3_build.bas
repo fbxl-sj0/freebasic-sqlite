@@ -211,6 +211,13 @@ Sub sqlite3FinishCoding CDecl Alias "sqlite3FinishCoding" ( _
                 sqlite3BuildDbMaskTest(pParse->writeMask, databaseIndex), _
                 CInt(pSchema->schema_cookie), CInt(pSchema->iGeneration))
             If db->init.busy = 0 Then sqlite3VdbeChangeP5(pVdbe, 1)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            Dim usesStatementJournal As SQLITE_C_INT = 0
+            If pParse->mayAbort <> 0 AndAlso pParse->isMultiWrite <> 0 Then _
+                usesStatementJournal = 1
+            sqlite3VdbeComment(pVdbe, StrPtr("usesStmtJournal=%d"), _
+                               usesStatementJournal)
+#endif
         End If
     Next
 

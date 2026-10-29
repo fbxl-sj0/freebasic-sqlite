@@ -45,6 +45,12 @@
 #include once "sqlite3_btree.bi"
 #include once "sqlite3_api_constants.bi"
 
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+Declare Function onErrorText CDecl Alias "onErrorText" ( _
+    ByVal conflictAction As SQLITE_C_INT _
+) As Const ZString Ptr
+#endif
+
 #include once "sqlite3_db_types.bi"
 #include once "sqlite3_walker.bi"
 #include once "sqlite3_expr_types.bi"
@@ -1162,6 +1168,23 @@ Private Function codeRowTrigger CDecl Alias "codeRowTrigger" ( _
     Dim pVdbe As SqliteVdbe Ptr = sqlite3GetVdbe(@subParse)
     Dim endTriggerLabel As SQLITE_C_INT = 0
     If pVdbe Then
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        Dim zTriggerTime As Const ZString Ptr = StrPtr("AFTER")
+        If pTrigger->tr_tm = TRIGGER_BEFORE Then _
+            zTriggerTime = StrPtr("BEFORE")
+        Dim zUpdate As Const ZString Ptr = StrPtr("")
+        Dim zInsert As Const ZString Ptr = StrPtr("")
+        Dim zDelete As Const ZString Ptr = StrPtr("")
+        Select Case pTrigger->op
+        Case TK_UPDATE: zUpdate = StrPtr("UPDATE")
+        Case TK_INSERT: zInsert = StrPtr("INSERT")
+        Case TK_DELETE: zDelete = StrPtr("DELETE")
+        End Select
+        sqlite3VdbeComment(pVdbe, _
+            StrPtr("Start: %s.%s (%s %s%s%s ON %s)"), _
+            pTrigger->zName, onErrorText(onConflict), zTriggerTime, _
+            zUpdate, zInsert, zDelete, pTable->zName)
+#endif
 #ifndef SQLITE_OMIT_TRACE
         If pTrigger->zName Then
             Dim pTrace As ZString Ptr = sqlite3MPrintf(db, _
@@ -1186,6 +1209,10 @@ Private Function codeRowTrigger CDecl Alias "codeRowTrigger" ( _
         If endTriggerLabel <> 0 Then _
             sqlite3VdbeResolveLabel(pVdbe, endTriggerLabel)
         sqlite3VdbeAddOp0(pVdbe, OP_Halt)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(pVdbe, StrPtr("End: %s.%s"), _
+            pTrigger->zName, onErrorText(onConflict))
+#endif
         transferParseError(pParse, @subParse)
 
         If pParse->nErr = 0 Then
@@ -1369,6 +1396,12 @@ Sub sqlite3CodeRowTriggerDirect CDecl Alias "sqlite3CodeRowTriggerDirect" ( _
     sqlite3VdbeAddOp4(pVdbe, OP_Program, registerBase, ignoreJump, _
         pParse->nMem, CPtr(Const ZString Ptr, pProgramEntry->pProgram), _
         P4_SUBPROGRAM)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+    Dim zTriggerName As Const ZString Ptr = pTrigger->zName
+    If zTriggerName = 0 Then zTriggerName = StrPtr("fkey")
+    sqlite3VdbeComment(pVdbe, StrPtr("Call: %s.%s"), _
+        zTriggerName, onErrorText(onConflict))
+#endif
     sqlite3VdbeChangeP5(pVdbe, CUShort(recursiveTrigger))
 End Sub
 

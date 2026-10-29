@@ -631,13 +631,6 @@ Sub sqlite3VdbeMemShallowCopy CDecl Alias "sqlite3VdbeMemShallowCopy" ( _
         pTo->flags = pTo->flags And Not (MEM_DYN Or MEM_STATIC Or MEM_EPHEM)
         pTo->flags = pTo->flags Or sourceType
     End If
-#ifdef SQLITE_DEBUG
-    ' SQLite stores its debug-only shallow-copy backpointer through the
-    ' C-const source argument; this annotation never changes the copied Mem.
-    pTo->pScopyFrom = CPtr(SqliteVdbeMem Ptr, pFrom)
-    pTo->mScopyFlags = pFrom->flags
-    CPtr(SqliteVdbeMem Ptr, pFrom)->bScopy = 1
-#endif
 End Sub
 
 Private Sub sqlite3VdbeMemReleaseAndSetInt64( _

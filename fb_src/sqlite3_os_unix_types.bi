@@ -31,6 +31,22 @@
 #include once "sqlite3_constants.bi"
 #include once "sqlite3_vfs.bi"
 
+#ifndef SQLITE_ENABLE_LOCKING_STYLE
+#ifdef __APPLE__
+#define SQLITE_ENABLE_LOCKING_STYLE 1
+#else
+#define SQLITE_ENABLE_LOCKING_STYLE 0
+#endif
+#endif
+
+#ifndef SQLITE3_FB_ENABLE_LOCKING_STYLE
+#if SQLITE_ENABLE_LOCKING_STYLE + 0 <> 0
+#define SQLITE3_FB_ENABLE_LOCKING_STYLE 1
+#else
+#define SQLITE3_FB_ENABLE_LOCKING_STYLE 0
+#endif
+#endif
+
 #ifndef UNIX_PATH_MAX
 #define UNIX_PATH_MAX 4096
 #endif
@@ -38,11 +54,9 @@
 #ifndef SQLITE3_FB_APPLE_LOCKING_STYLE
 #define SQLITE3_FB_APPLE_LOCKING_STYLE 0
 #ifdef __APPLE__
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
-#if SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
 #undef SQLITE3_FB_APPLE_LOCKING_STYLE
 #define SQLITE3_FB_APPLE_LOCKING_STYLE 1
-#endif
 #endif
 #endif
 #endif
@@ -179,6 +193,9 @@ Type UnixShmNode
     isReadonly As u8
     isUnlocked As u8
     deletePending As u8
+#ifdef SQLITE_DEBUG
+    nextShmId As u8
+#endif
 End Type
 
 Type UnixFile
@@ -190,6 +207,8 @@ Type UnixFile
     lockLevel As SQLITE_C_INT
     pLockInfo As UnixLockInfo Ptr
     pShmNode As UnixShmNode Ptr
+    ' Mirrors the per-connection unixShm.id used by debug FILESTAT output.
+    shmId As u8
     pDeferred As UnixDeferredFd Ptr
     lockingContext As Any Ptr
     deleteOnClose As u8
@@ -203,8 +222,11 @@ Type UnixFile
     szChunk As SQLITE_C_INT
     sectorSize As SQLITE_C_INT
     deviceCharacteristics As SQLITE_C_INT
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     openFlags As SQLITE_C_INT
+#endif
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE OrElse defined(__APPLE__)
+    fsFlags As u32
 #endif
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
     iBusyTimeout As u32
@@ -219,6 +241,13 @@ Type UnixFile
 #endif
 #ifdef OS_VXWORKS
     pId As VxworksFileId Ptr
+#endif
+#ifdef SQLITE_DEBUG
+    ' Track main-database writes and verify the transaction counter before
+    ' releasing a writer lock, matching the Unix VFS debug invariant.
+    transCntrChng As UByte
+    dbUpdate As UByte
+    inNormalWrite As UByte
 #endif
     ' C unixFile retains the VFS input path pointer instead of reserving a
     ' maximum-size path buffer inside every open file handle.
@@ -261,10 +290,10 @@ Type UnixFileCLayout
 #endif
     sectorSize As SQLITE_C_INT
     deviceCharacteristics As SQLITE_C_INT
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     openFlags As SQLITE_C_INT
 #endif
-#if defined(SQLITE_ENABLE_LOCKING_STYLE) OrElse defined(__APPLE__)
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE OrElse defined(__APPLE__)
     fsFlags As u32
 #endif
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
@@ -284,7 +313,7 @@ Type UnixFileCLayout
 #endif
 End Type
 
-#if SQLITE3_FB_APPLE_LOCKING_STYLE
+#ifdef __APPLE__
 Type UnixStatFs
     fBsize As u32
     fIosize As SQLITE_C_INT
@@ -304,7 +333,9 @@ Type UnixStatFs
     fFlagsExt As u32
     fReserved(0 To 6) As u32
 End Type
+#endif
 
+#if SQLITE3_FB_APPLE_LOCKING_STYLE
 Type ProxyLockingContext
     conchFile As UnixFile Ptr
     conchFilePath As ZString Ptr

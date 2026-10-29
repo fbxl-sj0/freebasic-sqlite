@@ -4,9 +4,31 @@
 # does not include this tree until the port has enough API coverage to link
 # existing clients.
 
+.DEFAULT_GOAL := all
+
 FBC ?= fbc
 CC ?= cc
+WIN_SEH_CC ?= clang
+WIN_SEH_DLLTOOL ?= llvm-dlltool
+WIN_SEH_LINKER ?= lld-link
+WIN_SEH_OBJCOPY ?= i686-w64-mingw32-objcopy
+WIN_SEH_TEST_LD ?= i686-w64-mingw32-ld
+WIN_SEH_TEST_DIR ?= build/wal-seh-bridge-win32-smoke
+WIN_SEH_TEST_LIBS ?= $(shell i686-w64-mingw32-gcc -print-file-name=libkernel32.a) $(shell i686-w64-mingw32-gcc -print-file-name=libmsvcrt.a)
+WIN_SEH_FAULT_CC ?= i686-w64-mingw32-gcc
+WIN_SEH_FAULT_DIR ?= build/wal-seh-fault-win32-smoke
+WIN_SEH_FAULT_CC64 ?= clang
+WIN_SEH_FAULT_LINKER64 ?= lld-link
+WIN_SEH_FAULT_DIR64 ?= build/wal-seh-fault-win64-smoke
+WIN_SEH_FAULT_DLL ?= $(TARGET)
+WIN_SEH_FAULT_DLL_IMPORT ?= $(dir $(WIN_SEH_FAULT_DLL))lib$(notdir $(basename $(WIN_SEH_FAULT_DLL))).dll.a
+WIN_SEH_WINE ?= wine
+WIN_SEH_SMOKE_DIR ?= build/wal-seh-bridge-smoke
+RTREE_LAYOUT_WIN32_CC ?= i686-w64-mingw32-gcc
+RTREE_LAYOUT_WIN32_DIR ?= build/rtree-matcharg-layout-win32
+WALKER_LAYOUT_WIN32_DIR ?= build/walker-layout-win32
 PYTHON ?= python3
+LLVM_NM ?= llvm-nm
 PKG_CONFIG ?= pkg-config
 THREADSAFE ?= 1
 FB_OS ?= unix
@@ -16,12 +38,15 @@ BODY_TYPE_MAPS ?=
 BODY_OPTIONS ?=
 C2FB_BODY_OPTIONS = $(BODY_TYPE_MAPS) $(BODY_OPTIONS)
 FB_DEFINE_FLAGS ?=
+WIN_VFS_DLL ?= $(TARGET)
 ICU_MAJOR ?= $(shell $(PKG_CONFIG) --modversion icu-i18n 2>/dev/null | sed 's/\..*//')
 ICU_CFLAGS ?= $(shell $(PKG_CONFIG) --cflags icu-i18n 2>/dev/null)
 ICU_LINK_FLAGS ?= $(shell $(PKG_CONFIG) --libs icu-i18n 2>/dev/null | sed 's/-l\([^ ]*\)/-l \1/g')
 C2FB ?= ../fb_tools/c2fb/build/c2fb
 MEMDEBUG_BACKTRACE_FLAGS ?= $(if $(shell getconf GNU_LIBC_VERSION 2>/dev/null),-d SQLITE3_FB_GLIBC_BACKTRACE=1)
 FB_PLATFORM_DEFINE_FLAGS =
+WIN_SEH_OBJECTS =
+WIN_SEH_POST_LINK =
 OS_KV_OPTIONAL ?= 0
 INCLUDE_EXISTING ?= 0
 ifeq ($(THREADSAFE),0)
@@ -72,13 +97,35 @@ SOURCES += $(wildcard sqlite3_bulk*.bas)
 # The default VFS is Unix. Windows builds use the separately ported Win32 VFS
 # and must not compile the Unix VFS or its source-specific C2FB shards.
 ifeq ($(FB_OS),windows)
-FB_TARGET_FLAGS ?= -target $(FB_TARGET) -asm att
+# Keep Win32 inline assembly in the syntax supported by the current gas backend.
+FB_TARGET_FLAGS ?= -target $(FB_TARGET) -asm intel
 FB_PLATFORM_DEFINE_FLAGS = -d SQLITE_OS_WIN
 FB_LINK_FLAGS ?= -l mingw32 -l mingwex -l msvcrt -l kernel32 -l user32 -l advapi32
 MEMDEBUG_BACKTRACE_FLAGS :=
 TARGET ?= build/sqlite3-fb-$(FB_TARGET).dll
 UNIX_ONLY_SOURCES = sqlite3_os_unix.bas $(wildcard sqlite3_bulk*os_unix*.bas) $(wildcard sqlite3_bulk*mutex_unix*.bas)
 SOURCES := $(filter-out $(UNIX_ONLY_SOURCES),$(SOURCES))
+
+# FreeBASIC has no structured-exception syntax. Keep only the lexical Windows
+# SEH frame in a compiler-specific bridge; WAL handling remains in FreeBASIC.
+ifneq ($(findstring SQLITE_USE_SEH,$(FB_DEFINE_FLAGS)),)
+WIN_SEH_OBJECTS = build/$(FB_TARGET)/sqlite3_win_seh_bridge.o
+ifeq ($(FB_TARGET),win64)
+WIN_SEH_CLANG_TARGET ?= x86_64-w64-windows-gnu
+else ifeq ($(FB_TARGET),win32)
+WIN_SEH_CLANG_TARGET ?= i686-pc-windows-msvc
+# MinGW ld.bfd leaves Clang's x86 SEH metadata at RVA 0. Wine rejects that PE
+# image; x86 chained SEH still works without this unused auxiliary section.
+WIN_SEH_POST_LINK = $(WIN_SEH_OBJCOPY) --remove-section=.sxdata $@
+else
+$(error SQLITE_USE_SEH requires FB_TARGET=win32 or win64)
+endif
+FB_LINK_FLAGS += -l ntdll
+
+$(WIN_SEH_OBJECTS): sqlite3_win_seh_bridge.c sqlite3_win_seh_bridge.h
+	mkdir -p $(dir $@)
+	$(WIN_SEH_CC) --target=$(WIN_SEH_CLANG_TARGET) -fms-extensions -O2 -c $< -o $@
+endif
 else ifeq ($(FB_OS),unix)
 FB_TARGET_FLAGS ?=
 FB_LINK_FLAGS ?= -Wl --version-script,sqlite3.map
@@ -165,15 +212,71 @@ ifneq ($(findstring SQLITE_ENABLE_STMTVTAB,$(FB_DEFINE_FLAGS)),)
 SOURCES += sqlite3_ext_stmtvtab.bas
 endif
 
-.PHONY: all clean check-interrupt regen-generated regen-api-declarations reconcile-function-status regen-extension-api-table regen-pragma-data bulk-candidates bulk-candidate-files bulk-candidate-files-loose check-bulk-candidates bulk-candidates-loose check-bulk-candidates-loose check-bulk-candidate-files-loose
+.PHONY: all clean check-interrupt audit-core-source-inventory audit-function-bodies audit-extension-function-bodies audit-extension-api-table check-wal-seh-bridge-wine check-wal-seh-bridge-win32-wine check-win32-wal-seh-fault-wine check-win64-wal-seh-fault-wine check-win-vfs-callback-abi check-rtree-matcharg-layout check-rtree-matcharg-layout-win32-wine check-walker-layout check-walker-layout-win32-wine regen-generated regen-api-declarations reconcile-function-status regen-extension-api-table regen-pragma-data bulk-candidates bulk-candidate-files bulk-candidate-files-loose check-bulk-candidates bulk-candidates-loose check-bulk-candidate-files-loose
+
+check-win-vfs-callback-abi:
+	$(PYTHON) tools/check_win_vfs_callback_abi.py --dll "$(WIN_VFS_DLL)" --nm "$(LLVM_NM)"
+
+# Compare the upstream C and production FreeBASIC R-Tree flexible-tail offsets.
+check-rtree-matcharg-layout:
+	mkdir -p build/rtree-matcharg-layout
+	$(CC) -std=c99 -ffunction-sections -fdata-sections -I.. -I../src \
+		-I../ext/rtree tests/rtree_matcharg_layout_reference.c \
+		-Wl,--gc-sections -o build/rtree-matcharg-layout/reference
+	$(FBC) -w all -i . tests/rtree_matcharg_layout.bas \
+		-x build/rtree-matcharg-layout/freebasic
+	build/rtree-matcharg-layout/reference > build/rtree-matcharg-layout/c-offset.txt
+	build/rtree-matcharg-layout/freebasic > build/rtree-matcharg-layout/fb-offset.txt
+	cmp build/rtree-matcharg-layout/c-offset.txt build/rtree-matcharg-layout/fb-offset.txt
+
+# Compare the Win32 record offset through the production FreeBASIC type and SQLite amalgamation.
+check-rtree-matcharg-layout-win32-wine:
+	mkdir -p $(RTREE_LAYOUT_WIN32_DIR)
+	$(RTREE_LAYOUT_WIN32_CC) -std=c99 -O0 -ffunction-sections -fdata-sections \
+		tests/rtree_matcharg_layout_amalgamation_reference.c \
+		-Wl,--gc-sections -o $(RTREE_LAYOUT_WIN32_DIR)/reference.exe
+	$(FBC) -target i686-w64-mingw32 -gen gcc -w all -i . \
+		tests/rtree_matcharg_layout.bas -x $(RTREE_LAYOUT_WIN32_DIR)/freebasic.exe
+	WINEDEBUG=-all $(WIN_SEH_WINE) $(RTREE_LAYOUT_WIN32_DIR)/reference.exe \
+		> $(RTREE_LAYOUT_WIN32_DIR)/c-offset.txt
+	WINEDEBUG=-all $(WIN_SEH_WINE) $(RTREE_LAYOUT_WIN32_DIR)/freebasic.exe \
+		> $(RTREE_LAYOUT_WIN32_DIR)/fb-offset.txt
+	cmp $(RTREE_LAYOUT_WIN32_DIR)/c-offset.txt $(RTREE_LAYOUT_WIN32_DIR)/fb-offset.txt
+
+# Compare the upstream Walker callback and union layout with the port's type.
+check-walker-layout:
+	mkdir -p build/walker-layout
+	$(CC) -std=c99 -ffunction-sections -fdata-sections \
+		tests/walker_layout_reference.c -Wl,--gc-sections \
+		-o build/walker-layout/reference
+	$(FBC) -w all -i . tests/walker_layout.bas \
+		-x build/walker-layout/freebasic
+	build/walker-layout/reference > build/walker-layout/c-layout.txt
+	build/walker-layout/freebasic > build/walker-layout/fb-layout.txt
+	cmp build/walker-layout/c-layout.txt build/walker-layout/fb-layout.txt
+
+# Compare the same Walker ABI layout in the Win32 target under Wine.
+check-walker-layout-win32-wine:
+	mkdir -p $(WALKER_LAYOUT_WIN32_DIR)
+	$(RTREE_LAYOUT_WIN32_CC) -std=c99 -O0 -ffunction-sections -fdata-sections \
+		tests/walker_layout_reference.c -Wl,--gc-sections \
+		-o $(WALKER_LAYOUT_WIN32_DIR)/reference.exe
+	$(FBC) -target i686-w64-mingw32 -gen gcc -w all -i . \
+		tests/walker_layout.bas -x $(WALKER_LAYOUT_WIN32_DIR)/freebasic.exe
+	WINEDEBUG=-all $(WIN_SEH_WINE) $(WALKER_LAYOUT_WIN32_DIR)/reference.exe \
+		> $(WALKER_LAYOUT_WIN32_DIR)/c-layout.txt
+	WINEDEBUG=-all $(WIN_SEH_WINE) $(WALKER_LAYOUT_WIN32_DIR)/freebasic.exe \
+		> $(WALKER_LAYOUT_WIN32_DIR)/fb-layout.txt
+	cmp $(WALKER_LAYOUT_WIN32_DIR)/c-layout.txt $(WALKER_LAYOUT_WIN32_DIR)/fb-layout.txt
 
 all: $(TARGET)
 
-$(TARGET): $(SOURCES) sqlite3_opcode_names.bas $(GENERATED_HEADERS) sqlite3_constants.bi sqlite3_types.bi sqlite3_mutex.bi sqlite3_status.bi sqlite3_db_types.bi sqlite3_stat4_types.bi sqlite3_percentile_types.bi sqlite3_parser_types.bi sqlite3_parser_token.bi sqlite3_expr_types.bi sqlite3_walker.bi sqlite3_window_state.bi sqlite3_fkey_types.bi sqlite3_schema_types.bi sqlite3_where_types.bi sqlite3_resolve_types.bi sqlite3_agginfo_types.bi sqlite3_walk_contexts.bi sqlite3_hash_types.bi sqlite3_bitvec.bi sqlite3_rowset.bi sqlite3_numeric.bi sqlite3_util_numeric.bi sqlite3_varint.bi sqlite3_fp.bi sqlite3_fault.bi sqlite3_vdbe_affinity.bi sqlite3_vdbe_compare.bi sqlite3_vdbe_serial.bi sqlite3_vdbe_record.bi sqlite3_vdbe_api.bi sqlite3_vdbe_mem_text.bi sqlite3_vdbe_mem_types.bi sqlite3_vdbe_core.bi sqlite3_vdbe_cursor.bi sqlite3_treeview_types.bi sqlite3_vdbesort_types.bi sqlite3_dbstat_types.bi sqlite3_result.bi sqlite3_straccum.bi sqlite3_json_string.bi sqlite3_json_values.bi sqlite3_json_parse.bi sqlite3_json_query.bi sqlite3_json_vtab_types.bi sqlite3_pcache.bi sqlite3_pcache1_types.bi sqlite3_vfs.bi sqlite3_os_kv_types.bi sqlite3_memjournal.bi sqlite3_memdb.bi sqlite3_pager.bi sqlite3_btree.bi sqlite3_integrity_types.bi sqlite3_insert_helpers.bi sqlite3_backup_types.bi sqlite3_memory_methods.bi sqlite3_date_types.bi sqlite3_vtab_types.bi sqlite3_carray_types.bi sqlite3_bytecode_vtab_types.bi sqlite3_pragma_types.bi sqlite3_pragma_helpers.bi sqlite3_std_types.bi sqlite3_collation.bi sqlite3.map
+$(TARGET): $(SOURCES) $(WIN_SEH_OBJECTS) sqlite3_opcode_names.bas $(GENERATED_HEADERS) sqlite3_constants.bi sqlite3_types.bi sqlite3_mutex.bi sqlite3_status.bi sqlite3_db_types.bi sqlite3_stat4_types.bi sqlite3_percentile_types.bi sqlite3_parser_types.bi sqlite3_parser_token.bi sqlite3_expr_types.bi sqlite3_walker.bi sqlite3_window_state.bi sqlite3_fkey_types.bi sqlite3_schema_types.bi sqlite3_where_types.bi sqlite3_resolve_types.bi sqlite3_agginfo_types.bi sqlite3_walk_contexts.bi sqlite3_hash_types.bi sqlite3_bitvec.bi sqlite3_rowset.bi sqlite3_numeric.bi sqlite3_util_numeric.bi sqlite3_varint.bi sqlite3_fp.bi sqlite3_fault.bi sqlite3_vdbe_affinity.bi sqlite3_vdbe_compare.bi sqlite3_vdbe_serial.bi sqlite3_vdbe_record.bi sqlite3_vdbe_api.bi sqlite3_vdbe_mem_text.bi sqlite3_vdbe_mem_types.bi sqlite3_vdbe_core.bi sqlite3_vdbe_cursor.bi sqlite3_treeview_types.bi sqlite3_vdbesort_types.bi sqlite3_dbstat_types.bi sqlite3_result.bi sqlite3_straccum.bi sqlite3_json_string.bi sqlite3_json_values.bi sqlite3_json_parse.bi sqlite3_json_query.bi sqlite3_json_vtab_types.bi sqlite3_pcache.bi sqlite3_pcache1_types.bi sqlite3_vfs.bi sqlite3_os_kv_types.bi sqlite3_memjournal.bi sqlite3_memdb.bi sqlite3_pager.bi sqlite3_btree.bi sqlite3_integrity_types.bi sqlite3_insert_helpers.bi sqlite3_backup_types.bi sqlite3_memory_methods.bi sqlite3_date_types.bi sqlite3_vtab_types.bi sqlite3_carray_types.bi sqlite3_bytecode_vtab_types.bi sqlite3_pragma_types.bi sqlite3_pragma_helpers.bi sqlite3_std_types.bi sqlite3_collation.bi sqlite3.map
 	mkdir -p $(dir $@)
 	$(FBC) $(FB_TARGET_FLAGS) $(THREAD_FLAGS) -dll -d SQLITE_THREADSAFE=$(THREADSAFE) $(FB_PLATFORM_DEFINE_FLAGS) $(FB_DEFINE_FLAGS) \
 		$(MEMDEBUG_BACKTRACE_FLAGS) \
-		$(FB_LINK_FLAGS) -x $@ $(SOURCES) $(if $(findstring SQLITE_ENABLE_ICU,$(FB_DEFINE_FLAGS)),$(ICU_LINK_FLAGS))
+		$(FB_LINK_FLAGS) -x $@ $(SOURCES) $(WIN_SEH_OBJECTS) $(if $(findstring SQLITE_ENABLE_ICU,$(FB_DEFINE_FLAGS)),$(ICU_LINK_FLAGS))
+	$(WIN_SEH_POST_LINK)
 
 ifneq ($(findstring SQLITE_ENABLE_ICU,$(FB_DEFINE_FLAGS)),)
 $(C2FB):
@@ -305,6 +408,126 @@ regen-api-declarations:
 reconcile-function-status:
 	$(MAKE) -C ../fb_tools/c2fb FBC='$(FBC)' converter
 	../fb_tools/c2fb/build/c2fb reconcile-functions PORTING_FUNCTIONS.csv .
+
+# Check every indexed C definition and compile debug/test plus upstream-disabled
+# bodies in a separate audit library. The validation define only exposes
+# bodies SQLite disables with false or debug-gated preprocessor conditions.
+audit-core-source-inventory:
+	$(PYTHON) tools/check_core_source_inventory.py
+
+audit-function-bodies: audit-core-source-inventory audit-extension-api-table
+	$(PYTHON) tools/check_function_body_coverage.py
+	$(MAKE) FBC='$(FBC)' THREADSAFE='$(THREADSAFE)' FB_OS=unix \
+		TARGET=build/function-body-audit/libsqlite3-fb-body-audit.so \
+		FB_DEFINE_FLAGS='-d SQLITE_DEBUG -d SQLITE_TEST -d SQLITE3_FB_COMPILE_DISABLED_BODIES' all
+
+audit-extension-function-bodies:
+	$(PYTHON) tools/check_function_body_coverage.py PORTING_EXTENSION_FUNCTIONS.csv
+
+audit-extension-api-table:
+	$(PYTHON) tools/check_extension_api_table_coverage.py
+
+# Compile the Windows-only callback boundary and execute a minimal FreeBASIC
+# callback harness under Wine. This does not build or stand in for SQLite tests.
+check-wal-seh-bridge-wine:
+	mkdir -p $(WIN_SEH_SMOKE_DIR)
+	$(FBC) -r -gen gcc -target win64 -asm att -i . -d SQLITE_OS_WIN \
+		-o $(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.c \
+		tests/sqlite_win_seh_bridge_smoke.bas
+	$(WIN_SEH_CC) --target=x86_64-w64-windows-gnu -fms-extensions -O2 -c \
+		sqlite3_win_seh_bridge.c -o $(WIN_SEH_SMOKE_DIR)/sqlite3_win_seh_bridge.o
+	$(WIN_SEH_CC) --target=x86_64-w64-windows-gnu -fms-extensions -O2 -c \
+		$(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.c \
+		-o $(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.o
+	$(WIN_SEH_DLLTOOL) -m i386:x86-64 -d tests/wal_seh_ntdll.def \
+		-l $(WIN_SEH_SMOKE_DIR)/ntdll.lib
+	$(WIN_SEH_DLLTOOL) -m i386:x86-64 -d tests/wal_seh_kernel32.def \
+		-l $(WIN_SEH_SMOKE_DIR)/kernel32.lib
+	$(WIN_SEH_DLLTOOL) -m i386:x86-64 -d tests/wal_seh_msvcrt.def \
+		-l $(WIN_SEH_SMOKE_DIR)/msvcrt.lib
+	$(WIN_SEH_LINKER) /subsystem:console /entry:entry /nodefaultlib /machine:x64 \
+		/out:$(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.exe \
+		$(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.o \
+		$(WIN_SEH_SMOKE_DIR)/sqlite3_win_seh_bridge.o \
+		$(WIN_SEH_SMOKE_DIR)/ntdll.lib $(WIN_SEH_SMOKE_DIR)/kernel32.lib \
+		$(WIN_SEH_SMOKE_DIR)/msvcrt.lib
+	WINEDEBUG=-all $(WIN_SEH_WINE) $(WIN_SEH_SMOKE_DIR)/sqlite_win_seh_bridge_smoke.exe
+
+# Exercise x86 SEH after removing the orphan .sxdata section emitted by ld.bfd.
+check-wal-seh-bridge-win32-wine:
+	mkdir -p $(WIN_SEH_TEST_DIR)
+	$(FBC) -r -gen gcc -target i686-w64-mingw32 -asm intel -i . -d SQLITE_OS_WIN \
+		-o $(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.c \
+		tests/sqlite_win_seh_bridge_smoke.bas
+	$(WIN_SEH_CC) --target=i686-pc-windows-msvc -fms-extensions -O2 -c \
+		sqlite3_win_seh_bridge.c -o $(WIN_SEH_TEST_DIR)/sqlite3_win_seh_bridge.o
+	$(WIN_SEH_CC) --target=i686-pc-windows-msvc -fms-extensions -O2 -c \
+		$(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.c \
+		-o $(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.o
+	$(WIN_SEH_TEST_LD) -m i386pe --subsystem console --entry _entry \
+		-o $(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.exe \
+		$(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.o \
+		$(WIN_SEH_TEST_DIR)/sqlite3_win_seh_bridge.o $(WIN_SEH_TEST_LIBS)
+	$(WIN_SEH_OBJCOPY) --remove-section=.sxdata \
+		$(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.exe
+	WINEDEBUG=-all $(WIN_SEH_WINE) \
+		$(WIN_SEH_TEST_DIR)/sqlite_win_seh_bridge_smoke.exe
+
+ifneq ($(filter check-win32-wal-seh-fault-wine,$(MAKECMDGOALS)),)
+ifneq ($(FB_OS),windows)
+$(error check-win32-wal-seh-fault-wine requires FB_OS=windows)
+endif
+ifneq ($(FB_TARGET),win32)
+$(error check-win32-wal-seh-fault-wine requires FB_TARGET=win32)
+endif
+ifeq ($(findstring SQLITE_USE_SEH,$(FB_DEFINE_FLAGS)),)
+$(error check-win32-wal-seh-fault-wine requires -d SQLITE_USE_SEH in FB_DEFINE_FLAGS)
+endif
+endif
+
+# Inject upstream fault point 650 through a real Win32 SQLite WAL operation.
+check-win32-wal-seh-fault-wine: $(TARGET)
+	mkdir -p $(WIN_SEH_FAULT_DIR)
+	$(WIN_SEH_FAULT_CC) -std=c89 -Wall -Wextra -Werror -DSQLITE_TEST -I.. \
+		tests/sqlite_windows_wal_seh_fault_smoke.c \
+		-L$(dir $(TARGET)) -l$(notdir $(basename $(TARGET))) \
+		-o $(WIN_SEH_FAULT_DIR)/sqlite_windows_wal_seh_fault_smoke.exe
+	cp $(TARGET) $(WIN_SEH_FAULT_DIR)/
+	cd $(WIN_SEH_FAULT_DIR) && WINEDEBUG=-all $(WIN_SEH_WINE) \
+		./sqlite_windows_wal_seh_fault_smoke.exe
+	cd $(WIN_SEH_FAULT_DIR) && WINEDEBUG=-all $(WIN_SEH_WINE) \
+		./sqlite_windows_wal_seh_fault_smoke.exe
+
+ifneq ($(filter check-win64-wal-seh-fault-wine,$(MAKECMDGOALS)),)
+ifneq ($(FB_OS),windows)
+$(error check-win64-wal-seh-fault-wine requires FB_OS=windows)
+endif
+ifneq ($(FB_TARGET),win64)
+$(error check-win64-wal-seh-fault-wine requires FB_TARGET=win64)
+endif
+ifeq ($(findstring SQLITE_USE_SEH,$(FB_DEFINE_FLAGS)),)
+$(error check-win64-wal-seh-fault-wine requires -d SQLITE_USE_SEH in FB_DEFINE_FLAGS)
+endif
+endif
+
+# Run the same injected WAL fault through the Win64 DLL import library.
+check-win64-wal-seh-fault-wine:
+	test -f "$(WIN_SEH_FAULT_DLL)" && test -f "$(WIN_SEH_FAULT_DLL_IMPORT)"
+	mkdir -p $(WIN_SEH_FAULT_DIR64)
+	$(WIN_SEH_FAULT_CC64) --target=x86_64-pc-windows-msvc -fms-extensions \
+		-O2 -DSQLITE_TEST -I.. -c tests/sqlite_windows_wal_seh_fault_smoke.c \
+		-o $(WIN_SEH_FAULT_DIR64)/sqlite_windows_wal_seh_fault_smoke.obj
+	$(WIN_SEH_DLLTOOL) -m i386:x86-64 -d tests/wal_seh_kernel32.def \
+		-l $(WIN_SEH_FAULT_DIR64)/kernel32.lib
+	$(WIN_SEH_FAULT_LINKER64) /machine:x64 /subsystem:console /entry:start \
+		/nodefaultlib /out:$(WIN_SEH_FAULT_DIR64)/sqlite_windows_wal_seh_fault_smoke.exe \
+		$(WIN_SEH_FAULT_DIR64)/sqlite_windows_wal_seh_fault_smoke.obj \
+		$(WIN_SEH_FAULT_DIR64)/kernel32.lib $(WIN_SEH_FAULT_DLL_IMPORT)
+	cp $(WIN_SEH_FAULT_DLL) $(WIN_SEH_FAULT_DIR64)/
+	cd $(WIN_SEH_FAULT_DIR64) && WINEDEBUG=-all $(WIN_SEH_WINE) \
+		./sqlite_windows_wal_seh_fault_smoke.exe
+	cd $(WIN_SEH_FAULT_DIR64) && WINEDEBUG=-all $(WIN_SEH_WINE) \
+		./sqlite_windows_wal_seh_fault_smoke.exe
 
 bulk-candidates: regen-generated
 	rm -rf "$(CANDIDATE_DIR)"

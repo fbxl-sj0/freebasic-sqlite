@@ -915,6 +915,10 @@ Type _c2fb_record_c2fb_Fts5FullTable
     pGlobal As c2fb_Fts5Global_ Ptr
     pSortCsr As c2fb_Fts5Cursor_ Ptr
     iSavepoint As Long
+#ifdef SQLITE_DEBUG
+    ' Upstream stores transaction-state assertions only in debug builds.
+    ts As c2fb_Fts5TransactionState
+#endif
 End Type
 
 Type _c2fb_record_c2fb_Fts5MatchPhrase

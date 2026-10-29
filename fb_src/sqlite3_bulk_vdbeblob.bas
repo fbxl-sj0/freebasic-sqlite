@@ -20,21 +20,21 @@
 
     Purpose:
 
-        Operate on an existing incremental-BLOB handle.
+        Open and operate SQLite incremental-BLOB handles.
 
     Responsibilities:
 
-        - Preserve the private incremental-BLOB handle layout.
+        - Open a table cell and preserve the private BLOB handle layout.
+        - Close a handle and seek it to another row.
         - Validate byte ranges before accessing the B-tree cursor.
         - Hold the connection and cursor locks across each payload operation.
         - Finalize an invalidated statement after SQLITE_ABORT.
-        - Report BLOB size, close a handle, and seek it to another row.
+        - Report BLOB size and read or write its payload bytes.
 
     This file intentionally does NOT contain:
 
-        - BLOB handle opening or construction of the VDBE program.
         - The B-tree payload storage implementation.
-        - A claim that compilation establishes runtime behavior parity.
+        - Generic VDBE opcode dispatch or transaction control.
 '/ 
 
 #lang "fb"
@@ -51,6 +51,10 @@
 #include once "sqlite3_vdbe_serial.bi"
 #include once "sqlite3_btree.bi"
 #include once "sqlite3_mutex.bi"
+
+Declare Function sqlite3SafetyCheckOk CDecl Alias "sqlite3SafetyCheckOk" ( _
+    ByVal db As Any Ptr _
+) As SQLITE_C_INT
 
 Declare Function sqlite3_finalize CDecl Alias "sqlite3_finalize" ( _
     ByVal pStatement As Any Ptr _
@@ -395,6 +399,9 @@ Function sqlite3_blob_open CDecl Alias "sqlite3_blob_open" ( _
 ) As SQLITE_C_INT Export
     If ppBlob = 0 Then Return SQLITE_MISUSE
     ppBlob[0] = 0
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return SQLITE_MISUSE
+#endif
     If db = 0 OrElse tableName = 0 OrElse columnName = 0 Then _
         Return SQLITE_MISUSE
 

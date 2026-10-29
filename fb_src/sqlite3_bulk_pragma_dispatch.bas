@@ -1033,19 +1033,16 @@ Private Function actionName CDecl Alias "actionName" (ByVal arg0 As UByte) As Co
 End Function
 
 Function sqlite3JournalModename CDecl Alias "sqlite3JournalModename" (ByVal arg0 As SQLITE_C_INT) As Const ZString Ptr
+#ifndef SQLITE_OMIT_WAL
     Static local0(0 To 5) As Const ZString Ptr = {Cast(Const ZString Ptr, StrPtr(!"delete")), Cast(Const ZString Ptr, StrPtr(!"persist")), Cast(Const ZString Ptr, StrPtr(!"off")), Cast(Const ZString Ptr, StrPtr(!"truncate")), Cast(Const ZString Ptr, StrPtr(!"memory")), Cast(Const ZString Ptr, StrPtr(!"wal"))}
+    Const journalModeCount As SQLITE_C_INT = 6
+#else
+    ' WAL is absent from the valid journal-mode names in this build.
+    Static local0(0 To 4) As Const ZString Ptr = {Cast(Const ZString Ptr, StrPtr(!"delete")), Cast(Const ZString Ptr, StrPtr(!"persist")), Cast(Const ZString Ptr, StrPtr(!"off")), Cast(Const ZString Ptr, StrPtr(!"truncate")), Cast(Const ZString Ptr, StrPtr(!"memory"))}
+    Const journalModeCount As SQLITE_C_INT = 5
+#endif
 
-    ' C static array storage
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    ' C unused-parameter annotation
-    If (-Cast(SQLITE_C_INT, ((arg0 = (Cast(SQLITE_C_INT, (Cast(sqlite3_uint64, (Cast(sqlite3_uint64, Cast(SQLITE_SIZE_T, (6ULL * SizeOf(Const ZString Ptr)))) \ Cast(sqlite3_uint64, Cast(SQLITE_SIZE_T, SizeOf(ZString Ptr)))))))))))) Then
-        Return Cast(SQLITE_C_INT, &O0ULL)
-    End If
+    If arg0 = journalModeCount Then Return 0
     Return local0(arg0)
 End Function
 

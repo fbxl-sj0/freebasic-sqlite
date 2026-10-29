@@ -799,6 +799,9 @@ Function sqlite3_enable_load_extension CDecl Alias "sqlite3_enable_load_extensio
     Dim c2fb_temp_2 As sqlite3_uint64 Ptr
     Dim c2fb_temp_3 As sqlite3_uint64
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return SQLITE_MISUSE
+#endif
     sqlite3_mutex_enter(arg0->mutex)
     If arg1 Then
         c2fb_temp_0 = @arg0->flags

@@ -72,6 +72,9 @@ Declare Function sqlite3VdbeStmtVMPrintf CDecl Alias "sqlite3VMPrintf" ( _
     ByVal zFormat As Const ZString Ptr, _
     ByVal sourceArgs As Cva_List _
 ) As ZString Ptr
+Declare Function sqlite3SafetyCheckOk CDecl Alias "sqlite3SafetyCheckOk" ( _
+    ByVal db As sqlite3 Ptr _
+) As SQLITE_C_INT
 
 Private Function vdbeSafety CDecl Alias "vdbeSafety" ( _
     ByVal pVdbe As SqliteVdbe Ptr _
@@ -1157,8 +1160,11 @@ Function sqlite3_next_stmt CDecl Alias "sqlite3_next_stmt" ( _
     ByVal pDatabase As Any Ptr, _
     ByVal pStatement As Any Ptr _
 ) As Any Ptr Export
-    If pDatabase = 0 Then Return 0
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
+    If pDatabase = 0 Then Return 0
     sqlite3_mutex_enter(db->mutex)
     Dim pNext As Any Ptr
     If pStatement = 0 Then
@@ -1173,8 +1179,11 @@ End Function
 Function sqlite3_last_insert_rowid CDecl Alias "sqlite3_last_insert_rowid" ( _
     ByVal pDatabase As Any Ptr _
 ) As sqlite3_int64 Export
-    If pDatabase = 0 Then Return 0
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
+    If pDatabase = 0 Then Return 0
     sqlite3_mutex_enter(db->mutex)
     Dim rowId As sqlite3_int64 = db->lastRowid
     sqlite3_mutex_leave(db->mutex)
@@ -1185,8 +1194,11 @@ Sub sqlite3_set_last_insert_rowid CDecl Alias "sqlite3_set_last_insert_rowid" ( 
     ByVal pDatabase As Any Ptr, _
     ByVal rowId As sqlite3_int64 _
 ) Export
-    If pDatabase = 0 Then Return
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return
+#endif
+    If pDatabase = 0 Then Return
     sqlite3_mutex_enter(db->mutex)
     db->lastRowid = rowId
     sqlite3_mutex_leave(db->mutex)
@@ -1195,8 +1207,11 @@ End Sub
 Function sqlite3_changes64 CDecl Alias "sqlite3_changes64" ( _
     ByVal pDatabase As Any Ptr _
 ) As sqlite3_int64 Export
-    If pDatabase = 0 Then Return 0
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
+    If pDatabase = 0 Then Return 0
     sqlite3_mutex_enter(db->mutex)
     Dim changeCount As sqlite3_int64 = db->nChange
     sqlite3_mutex_leave(db->mutex)
@@ -1213,8 +1228,11 @@ End Function
 Function sqlite3_total_changes64 CDecl Alias "sqlite3_total_changes64" ( _
     ByVal pDatabase As Any Ptr _
 ) As sqlite3_int64 Export
-    If pDatabase = 0 Then Return 0
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
+    If pDatabase = 0 Then Return 0
     sqlite3_mutex_enter(db->mutex)
     Dim changeCount As sqlite3_int64 = db->nTotalChange
     sqlite3_mutex_leave(db->mutex)

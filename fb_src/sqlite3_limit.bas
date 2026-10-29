@@ -15,13 +15,23 @@
     This file intentionally does NOT contain:
 
         - sqlite3_config() or runtime mutation of global hard-limit defaults.
-        - Enforcement paths for schema features that are not yet ported.
+        - Per-operation checks that consume aLimit entries; those live in the
+          parser, attach, schema-loader, trigger, VDBE, and sorter modules.
 '/
 
 #lang "fb"
 #include once "sqlite3_db_types.bi"
 #include once "sqlite3_constants.bi"
 #include once "sqlite3_mutex.bi"
+
+#if defined(SQLITE_ENABLE_API_ARMOR)
+Declare Function sqlite3SafetyCheckOk CDecl Alias "sqlite3SafetyCheckOk" ( _
+    ByVal db As sqlite3 Ptr _
+) As SQLITE_C_INT
+Declare Function sqlite3MisuseError CDecl Alias "sqlite3MisuseError" ( _
+    ByVal lineNumber As SQLITE_C_INT _
+) As SQLITE_C_INT
+#endif
 
 Private Dim Shared sqlite3HardLimitValues(0 To SQLITE_N_LIMIT - 1) As SQLITE_C_INT = { _
     SQLITE_MAX_LENGTH, _
@@ -71,6 +81,12 @@ Function sqlite3_limit CDecl Alias "sqlite3_limit" ( _
     ByVal limitId As SQLITE_C_INT, _
     ByVal newLimit As SQLITE_C_INT _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(CPtr(sqlite3 Ptr, pDatabase)) = 0 Then
+        sqlite3MisuseError(__LINE__)
+        Return -1
+    End If
+#endif
     If pDatabase = 0 OrElse limitId < 0 OrElse limitId >= SQLITE_N_LIMIT Then Return -1
     Dim db As sqlite3 Ptr = CPtr(sqlite3 Ptr, pDatabase)
     sqlite3_mutex_enter(db->mutex)

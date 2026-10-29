@@ -404,6 +404,9 @@ Function sqlite3_get_clientdata CDecl Alias "sqlite3_get_clientdata" ( _
     ByVal db As sqlite3 Ptr, _
     ByVal zName As Const ZString Ptr _
 ) As Any Ptr Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
     If db = 0 OrElse zName = 0 Then Return 0
     sqlite3_mutex_enter(db->mutex)
     Dim pClientData As SqliteDbClientData Ptr = db->pDbData
@@ -425,6 +428,9 @@ Function sqlite3_set_clientdata CDecl Alias "sqlite3_set_clientdata" ( _
     ByVal pData As Any Ptr, _
     ByVal xDestructorArgument As Any Ptr _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return SQLITE_MISUSE
+#endif
     If db = 0 OrElse zName = 0 Then Return SQLITE_MISUSE
 
     Dim xDestructor As SqliteDbClientDataDestructor = _
@@ -580,6 +586,9 @@ Function sqlite3_error_offset CDecl Alias "sqlite3_error_offset" (ByVal db As sq
 End Function
 
 Function sqlite3_db_mutex CDecl Alias "sqlite3_db_mutex" (ByVal db As sqlite3 Ptr) As Any Ptr Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
     If db = 0 Then Return 0
     Return db->mutex
 End Function
@@ -615,6 +624,9 @@ Function sqlite3_db_filename CDecl Alias "sqlite3_db_filename" ( _
     ByVal db As sqlite3 Ptr, _
     ByVal zDbName As Const ZString Ptr _
 ) As Const ZString Ptr Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
     If db = 0 Then Return 0
     Dim databaseIndex As SQLITE_C_INT = 0
     If zDbName <> 0 Then databaseIndex = sqlite3FindDbName(db, zDbName)
@@ -628,6 +640,9 @@ Function sqlite3_db_readonly CDecl Alias "sqlite3_db_readonly" ( _
     ByVal db As sqlite3 Ptr, _
     ByVal zDbName As Const ZString Ptr _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return -1
+#endif
     If db = 0 Then Return -1
     Dim databaseIndex As SQLITE_C_INT = 0
     If zDbName <> 0 Then databaseIndex = sqlite3FindDbName(db, zDbName)
@@ -641,8 +656,16 @@ Function sqlite3_db_name CDecl Alias "sqlite3_db_name" ( _
     ByVal db As sqlite3 Ptr, _
     ByVal index As SQLITE_C_INT _
 ) As Const ZString Ptr Export
-    If db = 0 OrElse index < 0 OrElse index >= db->nDb Then Return 0
-    Return db->aDb(index).zDbSName
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
+    If db = 0 Then Return 0
+    sqlite3_mutex_enter(db->mutex)
+    Dim zDatabaseName As Const ZString Ptr = 0
+    If index >= 0 AndAlso index < db->nDb Then _
+        zDatabaseName = db->aDb(index).zDbSName
+    sqlite3_mutex_leave(db->mutex)
+    Return zDatabaseName
 End Function
 
 Function sqlite3_txn_state CDecl Alias "sqlite3_txn_state" ( _

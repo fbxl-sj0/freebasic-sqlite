@@ -555,6 +555,371 @@ Private Function fts5IdxMalloc CDecl Alias "fts5IdxMalloc" (ByVal arg0 As c2fb_F
 ' c2fb source-line: 781
     Return CPtr(Any Ptr, c2fb_external_sqlite3Fts5MallocZero(CPtr(c2fb_c_int Ptr, @(arg0->rc)), arg1))
 End Function
+#ifdef SQLITE_DEBUG
+Extern sqlite3_fts5_may_be_corrupt _
+    Alias "sqlite3_fts5_may_be_corrupt" As c2fb_c_int
+
+Private Function sqlite3Fts5Corrupt CDecl Alias "sqlite3Fts5Corrupt" () As c2fb_c_int
+    Return SQLITE_CORRUPT_VTAB
+End Function
+
+Private Function fts5BufferCompareBlob CDecl Alias "fts5BufferCompareBlob" ( _
+    ByVal pLeft As c2fb_Fts5Buffer Ptr, _
+    ByVal pRight As Const UByte Ptr, _
+    ByVal nRight As c2fb_c_int _
+) As c2fb_c_int
+    If pLeft = 0 OrElse pLeft->n < 0 OrElse nRight < 0 Then
+        sqlite3DebugAssert(StrPtr(!"valid FTS5 comparison buffers"))
+        Return 0
+    End If
+
+    Dim nCompare As c2fb_c_int = pLeft->n
+    If nRight < nCompare Then nCompare = nRight
+
+    Dim result As c2fb_c_int = 0
+    If nCompare > 0 Then
+        If pLeft->p = 0 OrElse pRight = 0 Then
+            sqlite3DebugAssert(StrPtr(!"non-empty comparison buffers are non-null"))
+            Return 0
+        End If
+        result = c2fb_crt_memcmp( _
+            CPtr(Const Any Ptr, pLeft->p), CPtr(Const Any Ptr, pRight), _
+            Cast(c2fb_size_t, nCompare))
+    End If
+
+    If result = 0 Then result = pLeft->n - nRight
+    Return result
+End Function
+
+Private Const FTS5_DEBUG_MAIN_PREFIX As c2fb_c_int = 48
+Private Const FTS5_DEBUG_QUERY_PREFIX As c2fb_c_int = &H0001
+Private Const FTS5_DEBUG_QUERY_DESC As c2fb_c_int = &H0002
+Private Const FTS5_DEBUG_QUERY_TEST_NOIDX As c2fb_c_int = &H0004
+Private Const FTS5_DEBUG_QUERY_SCAN As c2fb_c_int = &H0008
+Private Const FTS5_DEBUG_QUERY_NOTOKENDATA As c2fb_c_int = &H0080
+
+Private Function fts5QueryCksum CDecl Alias "fts5QueryCksum" ( _
+    ByVal pIndex As c2fb_Fts5Index Ptr, _
+    ByVal indexNumber As c2fb_c_int, _
+    ByVal zTerm As Const ZString Ptr, _
+    ByVal termLength As c2fb_c_int, _
+    ByVal queryFlags As c2fb_c_int, _
+    ByVal pChecksum As c2fb_uint64 Ptr _
+) As c2fb_c_int
+    If pIndex = 0 OrElse pChecksum = 0 Then Return SQLITE_MISUSE
+
+    Dim detailMode As c2fb_c_int = pIndex->pConfig->eDetail
+    Dim checksum As c2fb_uint64 = pChecksum[0]
+    Dim pIter As c2fb_Fts5IndexIter Ptr = 0
+    Dim rc As c2fb_c_int = sqlite3Fts5IndexQuery( _
+        pIndex, zTerm, termLength, _
+        queryFlags Or FTS5_DEBUG_QUERY_NOTOKENDATA, 0, @pIter)
+
+    If rc = SQLITE_OK AndAlso pIter = 0 Then
+        sqlite3DebugAssert(StrPtr(!"pIter != 0 after a successful FTS5 query"))
+        rc = SQLITE_CORRUPT_VTAB
+    End If
+
+    While rc = SQLITE_OK AndAlso pIter <> 0 AndAlso pIter->bEof = 0
+        Dim rowid As c2fb_int64 = pIter->iRowid
+        If detailMode = FTS5_DETAIL_NONE Then
+            checksum = checksum Xor sqlite3Fts5IndexEntryCksum( _
+                rowid, 0, 0, indexNumber, zTerm, termLength)
+        Else
+            Dim reader As c2fb_Fts5PoslistReader
+            c2fb_external_sqlite3Fts5PoslistReaderInit( _
+                pIter->pData, pIter->nData, @reader)
+            While reader.bEof = 0
+                Dim position As c2fb_uint64 = Cast(c2fb_uint64, reader.iPos)
+                Dim columnNumber As c2fb_c_int = _
+                    Cast(c2fb_c_int, (position Shr 32) And &H7FFFFFFF)
+                Dim tokenOffset As c2fb_c_int = _
+                    Cast(c2fb_c_int, position And &H7FFFFFFF)
+                checksum = checksum Xor sqlite3Fts5IndexEntryCksum( _
+                    rowid, columnNumber, tokenOffset, indexNumber, _
+                    zTerm, termLength)
+                c2fb_external_sqlite3Fts5PoslistReaderNext(@reader)
+            Wend
+        End If
+
+        If rc = SQLITE_OK Then rc = sqlite3Fts5IterNext(pIter)
+    Wend
+
+    fts5IterClose(pIter)
+    pChecksum[0] = checksum
+    Return rc
+End Function
+
+Private Function fts5TestUtf8 CDecl Alias "fts5TestUtf8" ( _
+    ByVal zText As Const UByte Ptr, _
+    ByVal textLength As c2fb_c_int _
+) As c2fb_c_int
+    If textLength > 0 AndAlso zText = 0 Then Return 1
+    sqlite3DebugAssertCheck( _
+        sqlite3_fts5_may_be_corrupt <> 0 OrElse textLength > 0, _
+        StrPtr(!"n>0"))
+
+    Dim byteIndex As c2fb_c_int = 0
+    While byteIndex < textLength
+        Dim firstByte As c2fb_c_int = zText[byteIndex]
+        If (firstByte And &H80) = 0 Then
+            byteIndex += 1
+        ElseIf (firstByte And &HE0) = &HC0 Then
+            If byteIndex + 1 >= textLength OrElse _
+               (zText[byteIndex + 1] And &HC0) <> &H80 Then Return 1
+            byteIndex += 2
+        ElseIf (firstByte And &HF0) = &HE0 Then
+            If byteIndex + 2 >= textLength OrElse _
+               (zText[byteIndex + 1] And &HC0) <> &H80 OrElse _
+               (zText[byteIndex + 2] And &HC0) <> &H80 Then Return 1
+            byteIndex += 3
+        ElseIf (firstByte And &HF8) = &HF0 Then
+            If byteIndex + 3 >= textLength OrElse _
+               (zText[byteIndex + 1] And &HC0) <> &H80 OrElse _
+               (zText[byteIndex + 2] And &HC0) <> &H80 OrElse _
+               (zText[byteIndex + 3] And &HC0) <> &H80 Then Return 1
+            byteIndex += 4
+        Else
+            Return 1
+        End If
+    Wend
+    Return 0
+End Function
+
+Private Sub fts5TestTerm CDecl Alias "fts5TestTerm" ( _
+    ByVal pIndex As c2fb_Fts5Index Ptr, _
+    ByVal pPreviousTerm As c2fb_Fts5Buffer Ptr, _
+    ByVal zTerm As Const ZString Ptr, _
+    ByVal termLength As c2fb_c_int, _
+    ByVal expectedChecksum As c2fb_uint64, _
+    ByVal pChecksum As c2fb_uint64 Ptr, _
+    ByVal pTestFailed As c2fb_c_int Ptr _
+)
+    If pIndex = 0 OrElse pPreviousTerm = 0 OrElse _
+       pChecksum = 0 OrElse pTestFailed = 0 Then
+        sqlite3DebugAssert(StrPtr(!"valid FTS5 term integrity-check state"))
+        Exit Sub
+    End If
+
+    Dim rc As c2fb_c_int = pIndex->rc
+    If pPreviousTerm->n = 0 Then
+        c2fb_external_sqlite3Fts5BufferSet( _
+            @rc, pPreviousTerm, termLength, CPtr(Const UByte Ptr, zTerm))
+    Else
+        Dim termChanged As c2fb_c_int = (pPreviousTerm->n <> termLength)
+        If termChanged = 0 AndAlso termLength > 0 Then
+            If pPreviousTerm->p = 0 OrElse zTerm = 0 Then
+                sqlite3DebugAssert(StrPtr(!"non-empty FTS5 terms are non-null"))
+                Exit Sub
+            End If
+            termChanged = (c2fb_crt_memcmp( _
+                CPtr(Const Any Ptr, pPreviousTerm->p), _
+                CPtr(Const Any Ptr, zTerm), Cast(c2fb_size_t, termLength)) <> 0)
+        End If
+
+        If pTestFailed[0] = 0 AndAlso rc = SQLITE_OK AndAlso _
+           termChanged <> 0 AndAlso _
+           (pIndex->pHash = 0 OrElse pIndex->pHash->nEntry = 0) Then
+            Dim checksum3 As c2fb_uint64 = pChecksum[0]
+            Dim zQueryTerm As Const ZString Ptr = _
+                CPtr(Const ZString Ptr, @pPreviousTerm->p[1])
+            Dim queryLength As c2fb_c_int = pPreviousTerm->n - 1
+            Dim indexNumber As c2fb_c_int = _
+                Cast(c2fb_c_int, pPreviousTerm->p[0]) - FTS5_DEBUG_MAIN_PREFIX
+            Dim flags As c2fb_c_int = 0
+            If indexNumber <> 0 Then flags = FTS5_DEBUG_QUERY_PREFIX
+            Dim checksumAscending As c2fb_uint64 = 0
+            Dim checksumDescending As c2fb_uint64 = 0
+
+            rc = fts5QueryCksum( _
+                pIndex, indexNumber, zQueryTerm, queryLength, flags, _
+                @checksumAscending)
+            If rc = SQLITE_OK Then
+                rc = fts5QueryCksum( _
+                    pIndex, indexNumber, zQueryTerm, queryLength, _
+                    flags Or FTS5_DEBUG_QUERY_DESC, @checksumDescending)
+            End If
+            If rc = SQLITE_OK AndAlso checksumAscending <> checksumDescending Then _
+                rc = sqlite3Fts5Corrupt()
+
+            If pIndex->nPendingData = 0 AndAlso _
+               fts5TestUtf8(CPtr(Const UByte Ptr, zQueryTerm), queryLength) = 0 Then
+                If indexNumber > 0 AndAlso rc = SQLITE_OK Then
+                    checksumDescending = 0
+                    rc = fts5QueryCksum( _
+                        pIndex, indexNumber, zQueryTerm, queryLength, _
+                        flags Or FTS5_DEBUG_QUERY_TEST_NOIDX, _
+                        @checksumDescending)
+                    If rc = SQLITE_OK AndAlso _
+                       checksumAscending <> checksumDescending Then _
+                        rc = sqlite3Fts5Corrupt()
+                End If
+                If indexNumber > 0 AndAlso rc = SQLITE_OK Then
+                    checksumDescending = 0
+                    rc = fts5QueryCksum( _
+                        pIndex, indexNumber, zQueryTerm, queryLength, _
+                        flags Or FTS5_DEBUG_QUERY_TEST_NOIDX Or _
+                            FTS5_DEBUG_QUERY_DESC, @checksumDescending)
+                    If rc = SQLITE_OK AndAlso _
+                       checksumAscending <> checksumDescending Then _
+                        rc = sqlite3Fts5Corrupt()
+                End If
+            End If
+
+            checksum3 = checksum3 Xor checksumAscending
+            c2fb_external_sqlite3Fts5BufferSet( _
+                @rc, pPreviousTerm, termLength, CPtr(Const UByte Ptr, zTerm))
+            If rc = SQLITE_OK AndAlso checksum3 <> expectedChecksum Then _
+                pTestFailed[0] = 1
+            pChecksum[0] = checksum3
+        End If
+    End If
+    pIndex->rc = rc
+End Sub
+
+Private Sub fts5AssertComparisonResult CDecl _
+    Alias "fts5AssertComparisonResult" ( _
+    ByVal pIter As c2fb_Fts5Iter Ptr, _
+    ByVal pLeft As c2fb_Fts5SegIter Ptr, _
+    ByVal pRight As c2fb_Fts5SegIter Ptr, _
+    ByVal pResult As c2fb_Fts5CResult Ptr _
+)
+    If pIter = 0 OrElse pLeft = 0 OrElse pRight = 0 OrElse pResult = 0 Then
+        sqlite3DebugAssert(StrPtr(!"valid FTS5 multi-iterator comparison"))
+        Exit Sub
+    End If
+
+    Dim pSegments As c2fb_Fts5SegIter Ptr = _
+        CPtr(c2fb_Fts5SegIter Ptr, c2fb_Fts5Iter_aSeg_tail_ptr(pIter))
+    Dim leftIndex As c2fb_c_int = -1
+    Dim rightIndex As c2fb_c_int = -1
+    For segmentIndex As c2fb_c_int = 0 To pIter->nSeg - 1
+        Dim pSegment As c2fb_Fts5SegIter Ptr = @pSegments[segmentIndex]
+        If pSegment = pLeft Then leftIndex = segmentIndex
+        If pSegment = pRight Then rightIndex = segmentIndex
+    Next
+
+    sqlite3DebugAssertCheck( _
+        leftIndex >= 0 AndAlso rightIndex >= 0, _
+        StrPtr(!"p1 and p2 belong to pIter->aSeg"))
+    If leftIndex < 0 OrElse rightIndex < 0 Then Exit Sub
+
+    If pLeft->pLeaf OrElse pRight->pLeaf Then
+        If pLeft->pLeaf = 0 Then
+            sqlite3DebugAssertCheck( _
+                pResult->iFirst = rightIndex, _
+                StrPtr(!"pRes->iFirst==i2"))
+        ElseIf pRight->pLeaf = 0 Then
+            sqlite3DebugAssertCheck( _
+                pResult->iFirst = leftIndex, _
+                StrPtr(!"pRes->iFirst==i1"))
+        Else
+            Dim result As c2fb_c_int = _
+                fts5BufferCompare(@pLeft->term, @pRight->term)
+            If result = 0 Then
+                sqlite3DebugAssertCheck( _
+                    pResult->bTermEq = 1, StrPtr(!"pRes->bTermEq==1"))
+                sqlite3DebugAssertCheck( _
+                    pLeft->iRowid <> pRight->iRowid, _
+                    StrPtr(!"p1->iRowid!=p2->iRowid"))
+                If (pLeft->iRowid > pRight->iRowid) = (pIter->bRev <> 0) Then
+                    result = -1
+                Else
+                    result = 1
+                End If
+            Else
+                sqlite3DebugAssertCheck( _
+                    pResult->bTermEq = 0, StrPtr(!"pRes->bTermEq==0"))
+            End If
+
+            If result < 0 Then
+                sqlite3DebugAssertCheck( _
+                    pResult->iFirst = leftIndex, _
+                    StrPtr(!"pRes->iFirst==i1"))
+            Else
+                sqlite3DebugAssertCheck( _
+                    pResult->iFirst = rightIndex, _
+                    StrPtr(!"pRes->iFirst==i2"))
+            End If
+        End If
+    End If
+End Sub
+
+Private Sub fts5AssertMultiIterSetup CDecl _
+    Alias "fts5AssertMultiIterSetup" ( _
+    ByVal pIndex As c2fb_Fts5Index Ptr, _
+    ByVal pIter As c2fb_Fts5Iter Ptr _
+)
+    If pIndex = 0 OrElse pIter = 0 Then
+        sqlite3DebugAssert(StrPtr(!"valid FTS5 multi-iterator state"))
+        Exit Sub
+    End If
+    If pIndex->rc <> SQLITE_OK Then Exit Sub
+
+    If pIter->nSeg < 1 OrElse pIter->aFirst = 0 Then
+        sqlite3DebugAssert(StrPtr(!"pIter has segment result state"))
+        Exit Sub
+    End If
+
+    Dim pSegments As c2fb_Fts5SegIter Ptr = _
+        CPtr(c2fb_Fts5SegIter Ptr, c2fb_Fts5Iter_aSeg_tail_ptr(pIter))
+    Dim pResults As c2fb_Fts5CResult Ptr = _
+        CPtr(c2fb_Fts5CResult Ptr, pIter->aFirst)
+    Dim firstIndex As c2fb_c_int = pResults[1].iFirst
+    If firstIndex < 0 OrElse firstIndex >= pIter->nSeg Then
+        sqlite3DebugAssert(StrPtr(!"pFirst is inside pIter->aSeg"))
+        Exit Sub
+    End If
+    Dim pFirst As c2fb_Fts5SegIter Ptr = @pSegments[firstIndex]
+
+    sqlite3DebugAssertCheck( _
+        (pFirst->pLeaf = 0) = (pIter->base.bEof <> 0), _
+        StrPtr(!"(pFirst->pLeaf==0)==pIter->base.bEof"))
+
+    For segmentIndex As c2fb_c_int = 0 To pIter->nSeg - 1
+        Dim pSegment As c2fb_Fts5SegIter Ptr = @pSegments[segmentIndex]
+        If pSegment <> pFirst AndAlso pSegment->pLeaf Then
+            Dim termsDiffer As c2fb_c_int = _
+                fts5BufferCompare(@pFirst->term, @pSegment->term)
+            sqlite3DebugAssertCheck( _
+                termsDiffer <> 0 OrElse _
+                pSegment->iRowid = pIter->iSwitchRowid OrElse _
+                ((pSegment->iRowid < pIter->iSwitchRowid) = _
+                 (pIter->bRev <> 0)), _
+                StrPtr(!"pIter->iSwitchRowid is correct"))
+        End If
+    Next
+
+    For segmentIndex As c2fb_c_int = 0 To pIter->nSeg - 1 Step 2
+        If segmentIndex + 1 >= pIter->nSeg Then
+            sqlite3DebugAssert(StrPtr(!"multi-iterator segments are paired"))
+            Exit For
+        End If
+        Dim resultIndex As c2fb_c_int = _
+            (pIter->nSeg + segmentIndex) \ 2
+        If resultIndex < 0 OrElse resultIndex >= pIter->nSeg Then
+            sqlite3DebugAssert(StrPtr(!"comparison result index is valid"))
+            Exit For
+        End If
+        fts5AssertComparisonResult( _
+            pIter, @pSegments[segmentIndex], @pSegments[segmentIndex + 1], _
+            @pResults[resultIndex])
+    Next
+
+    For treeIndex As c2fb_c_int = 1 To (pIter->nSeg \ 2) - 1 Step 2
+        Dim leftIndex As c2fb_c_int = pResults[treeIndex * 2].iFirst
+        Dim rightIndex As c2fb_c_int = pResults[treeIndex * 2 + 1].iFirst
+        If leftIndex < 0 OrElse leftIndex >= pIter->nSeg OrElse _
+           rightIndex < 0 OrElse rightIndex >= pIter->nSeg Then
+            sqlite3DebugAssert(StrPtr(!"multi-iterator child indexes are valid"))
+            Exit For
+        End If
+        fts5AssertComparisonResult( _
+            pIter, @pSegments[leftIndex], @pSegments[rightIndex], _
+            @pResults[treeIndex])
+    Next
+End Sub
+#endif
 Private Function fts5BufferCompare CDecl Alias "fts5BufferCompare" (ByVal arg0 As c2fb_Fts5Buffer Ptr, ByVal arg1 As c2fb_Fts5Buffer Ptr) As c2fb_c_int
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_index.c
 ' c2fb source-line: 813
@@ -2295,6 +2660,8 @@ Private Function fts5GetPoslistSize CDecl Alias "fts5GetPoslistSize" (ByVal arg0
     (*c2fb_temp_6) = c2fb_temp_7
     Return local1
 End Function
+
+
 Private Sub fts5SegIterLoadNPos CDecl Alias "fts5SegIterLoadNPos" (ByVal arg0 As c2fb_Fts5Index Ptr, ByVal arg1 As c2fb_Fts5SegIter Ptr)
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_index.c
 ' c2fb source-line: 1894
@@ -3795,6 +4162,15 @@ Private Sub fts5SegIterSeekInit CDecl Alias "fts5SegIterSeekInit" (ByVal arg0 As
     If (-Cast(c2fb_c_int, ((Cast(c2fb_c_int, &O0ULL) = (Cast(c2fb_c_int, (arg3 And Cast(c2fb_c_int, &H0100ULL)))))))) Then
         fts5SegIterAllocTombstone(arg0, arg5)
     End If
+#ifdef SQLITE_DEBUG
+    sqlite3DebugAssertCheck( _
+        sqlite3_fts5_may_be_corrupt <> 0 OrElse _
+        arg0->rc <> SQLITE_OK OrElse arg5->pLeaf = 0 OrElse _
+        fts5BufferCompareBlob(@arg5->term, arg1, arg2) = 0 OrElse _
+        (((arg3 And FTS5_DEBUG_QUERY_SCAN) <> 0) AndAlso _
+         fts5BufferCompareBlob(@arg5->term, arg1, arg2) > 0), _
+        StrPtr(!"query term matches the selected segment iterator"))
+#endif
     ' C unused-parameter annotation
 End Sub
 Private Function fts5IdxNextStmt CDecl Alias "fts5IdxNextStmt" (ByVal arg0 As c2fb_Fts5Index Ptr) As c2fb_sqlite3_stmt Ptr
@@ -3907,6 +4283,14 @@ Private Sub fts5SegIterNextInit CDecl Alias "fts5SegIterNextInit" (ByVal arg0 As
         If local1 Then
             fts5SegIterLoadDlidx(arg0, arg4)
         End If
+#ifdef SQLITE_DEBUG
+        If arg0->rc = SQLITE_OK Then
+            sqlite3DebugAssertCheck( _
+                fts5BufferCompareBlob( _
+                    @arg4->term, CPtr(Const UByte Ptr, arg1), arg2) > 0, _
+                StrPtr(!"p->rc!=SQLITE_OK || term>pTerm"))
+        End If
+#endif
         ' C unused-parameter annotation
     End If
 End Sub
@@ -4580,7 +4964,9 @@ Private Sub fts5MultiIterNext CDecl Alias "fts5MultiIterNext" (ByVal arg0 As c2f
                 Return
             End If
         End If
-        ' empty C statement
+        #ifdef SQLITE_DEBUG
+        fts5AssertMultiIterSetup(arg0, arg1)
+#endif
         ' C unused-parameter annotation
         If (-Cast(c2fb_c_int, (((((-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((Cast(c2fb_c_int, arg1->bSkipEmpty) = Cast(c2fb_c_int, &O0ULL))))) <> 0) OrElse (local3->nPos <> 0)))))) <> 0) AndAlso ((-Cast(c2fb_c_int, ((Cast(c2fb_c_int, &O0ULL) = fts5MultiIterIsDeleted(arg1))))) <> 0))))) Then
             CPtr(c2fb_callback_349, arg1->xSetOutputs)(arg1, local3)
@@ -4621,7 +5007,9 @@ Private Sub fts5MultiIterNext2 CDecl Alias "fts5MultiIterNext2" (ByVal arg0 As c
                 c2fb_temp_3 = Cast(c2fb_c_int, Cast(c2fb_c_int, 1ULL))
                 (*c2fb_temp_2) = c2fb_temp_3
             End If
-            ' empty C statement
+            #ifdef SQLITE_DEBUG
+        fts5AssertMultiIterSetup(arg0, arg1)
+#endif
         c2fb_flow_1:
         Loop While (-Cast(c2fb_c_int, (((((-Cast(c2fb_c_int, (((fts5MultiIterIsEmpty(arg0, arg1) <> 0) OrElse (fts5MultiIterIsDeleted(arg1) <> 0)))))) <> 0) AndAlso (((-Cast(c2fb_c_int, ((arg0->rc = Cast(c2fb_c_int, &O0ULL)))))) <> 0)))))
         c2fb_flow_0:
@@ -4990,9 +5378,23 @@ Private Sub fts5SegiterPoslist CDecl Alias "fts5SegiterPoslist" (ByVal arg0 As c
     Dim c2fb_temp_10 As Any Ptr Ptr
     Dim c2fb_temp_11 As c2fb_Fts5Colset Ptr
 
+#ifdef SQLITE_DEBUG
+    If arg3 = 0 Then _
+        sqlite3DebugAssert(StrPtr(!"pBuf!=0"))
+    If arg1 = 0 Then _
+        sqlite3DebugAssert(StrPtr(!"pSeg!=0"))
+#endif
     ' C unused-parameter annotation
     ' C unused-parameter annotation
     If (-Cast(c2fb_c_int, ((Cast(c2fb_c_int, &O0ULL) = (IIf((-Cast(c2fb_c_int, ((Cast(c2fb_c_uint, (Cast(c2fb_c_uint, ((arg3)->n)) + Cast(c2fb_c_uint, (Cast(c2fb_c_int, (arg1->nPos + Cast(c2fb_c_int, 8ULL))))))) <= Cast(c2fb_c_uint, ((arg3)->nSpace)))))), Cast(c2fb_c_int, &O0ULL), c2fb_external_sqlite3Fts5BufferSize((CPtr(c2fb_c_int Ptr, @(arg0->rc))), (arg3), Cast(c2fb_c_int, ((Cast(c2fb_c_int, (arg1->nPos + Cast(c2fb_c_int, 8ULL)))) + (arg3)->n))))))))) Then
+#ifdef SQLITE_DEBUG
+        If arg3->p = 0 Then _
+            sqlite3DebugAssert(StrPtr(!"pBuf->p!=0"))
+        If Cast(c2fb_int64, arg3->nSpace) < _
+           Cast(c2fb_int64, arg3->n) + _
+           Cast(c2fb_int64, arg1->nPos) + 8 Then _
+            sqlite3DebugAssert(StrPtr(!"pBuf->nSpace >= pBuf->n+pSeg->nPos+FTS5_DATA_ZERO_PADDING"))
+#endif
         ' C unused-parameter annotation
         ' C unused-parameter annotation
         c2fb_temp_0 = CPtr(Any Ptr, c2fb_crt_memset(CPtr(Any Ptr, CPtr(UByte Ptr, @(arg3->p[Cast(c2fb_c_int, (arg3->n + arg1->nPos))]))), Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, 8ULL)))
@@ -5372,7 +5774,9 @@ Private Sub fts5MultiIterFinishSetup CDecl Alias "fts5MultiIterFinishSetup" (ByV
     Wend
     c2fb_flow_0:
     fts5MultiIterSetEof(arg1)
-    ' empty C statement
+    #ifdef SQLITE_DEBUG
+        fts5AssertMultiIterSetup(arg0, arg1)
+#endif
     If (-Cast(c2fb_c_int, (((((-Cast(c2fb_c_int, (((arg1->bSkipEmpty <> 0) AndAlso (fts5MultiIterIsEmpty(arg0, arg1) <> 0)))))) <> 0) OrElse (fts5MultiIterIsDeleted(arg1) <> 0))))) Then
         fts5MultiIterNext(arg0, arg1, Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL))
     Else
@@ -10550,6 +10954,10 @@ Private Sub fts5IndexTombstoneRebuild CDecl Alias "fts5IndexTombstoneRebuild" (B
     Else
         If (-Cast(c2fb_c_int, ((arg1->nPgTombstone = Cast(c2fb_c_int, 1ULL))))) Then
             local4 = fts5GetU32(CPtr(Const UByte Ptr, CPtr(UByte Ptr, @(arg2->p[Cast(c2fb_c_int, 4ULL)]))))
+#ifdef SQLITE_DEBUG
+            If arg2 = 0 OrElse arg3 <> 0 Then _
+                sqlite3DebugAssert(StrPtr(!"pData1 && iPg1==0"))
+#endif
             ' C unused-parameter annotation
             If (-Cast(c2fb_c_int, ((local4 > (Cast(c2fb_c_uint, (Cast(c2fb_c_uint, local1) \ Cast(c2fb_c_uint, Cast(c2fb_c_int, 4ULL))))))))) Then
                 c2fb_temp_2 = Cast(c2fb_int64, Cast(c2fb_c_int, &O0ULL))
@@ -10573,6 +10981,10 @@ Private Sub fts5IndexTombstoneRebuild CDecl Alias "fts5IndexTombstoneRebuild" (B
         local6 = Cast(c2fb_c_int, &O0ULL)
         local7 = Cast(c2fb_c_int, &O0ULL)
         local8 = Cast(c2fb_c_int, &O0ULL)
+#ifdef SQLITE_DEBUG
+        If local2 < local0 Then _
+            sqlite3DebugAssert(StrPtr(!"nSlot>=MINSLOT"))
+#endif
         ' C unused-parameter annotation
         c2fb_temp_7 = CPtr(_c2fb_record_c2fb_Fts5Data Ptr Ptr, CPtr(c2fb_Fts5Data Ptr Ptr, CPtr(Any Ptr, c2fb_external_sqlite3Fts5MallocZero(CPtr(c2fb_c_int Ptr, @(arg0->rc)), Cast(c2fb_uint64, (Cast(c2fb_uint64, Cast(c2fb_size_t, SizeOf(c2fb_Fts5Data Ptr))) * Cast(c2fb_uint64, local3)))))))
         local8 = c2fb_temp_7
@@ -10620,6 +11032,10 @@ Private Sub fts5IndexTombstoneRebuild CDecl Alias "fts5IndexTombstoneRebuild" (B
             (*c2fb_temp_22) = c2fb_temp_23
             Goto c2fb_flow_0
         End If
+#ifdef SQLITE_DEBUG
+        If arg0->rc <> SQLITE_OK Then _
+            sqlite3DebugAssert(StrPtr(!"p->rc==SQLITE_OK"))
+#endif
         ' C unused-parameter annotation
         fts5IndexFreeArray(local8, local3)
         c2fb_temp_24 = Cast(c2fb_int64, local1)
@@ -10665,6 +11081,10 @@ Private Sub fts5IndexTombstoneAdd CDecl Alias "fts5IndexTombstoneAdd" (ByVal arg
         c2fb_temp_3 = CPtr(_c2fb_record_c2fb_Fts5Data Ptr, CPtr(c2fb_Fts5Data Ptr, fts5DataRead(arg0, (Cast(c2fb_int64, (Cast(c2fb_int64, (Cast(c2fb_int64, ((Cast(c2fb_int64, (Cast(c2fb_int64, (Cast(c2fb_c_int, (arg1->iSegid + (Cast(c2fb_c_int, (Cast(c2fb_c_int, 1ULL) Shl Cast(c2fb_c_int, 16ULL)))))))) Shl (Cast(c2fb_c_int, (Cast(c2fb_c_int, (Cast(c2fb_c_int, 31ULL) + Cast(c2fb_c_int, 5ULL))) + Cast(c2fb_c_int, 1ULL))))))) + (Cast(c2fb_int64, (Cast(c2fb_int64, (Cast(c2fb_c_int, &O0ULL))) Shl (Cast(c2fb_c_int, (Cast(c2fb_c_int, 31ULL) + Cast(c2fb_c_int, 5ULL))))))))) + (Cast(c2fb_int64, (Cast(c2fb_int64, (Cast(c2fb_c_int, &O0ULL))) Shl (Cast(c2fb_c_int, 31ULL))))))) + (Cast(c2fb_int64, (local1)))))))))
         local0 = c2fb_temp_3
         If (-Cast(c2fb_c_int, ((local0 = Cast(c2fb_c_int, &O0ULL))))) Then
+#ifdef SQLITE_DEBUG
+            If arg0->rc = SQLITE_OK Then _
+                sqlite3DebugAssert(StrPtr(!"p->rc!=SQLITE_OK"))
+#endif
             ' C unused-parameter annotation
             Return
         End If
@@ -10681,6 +11101,10 @@ Private Sub fts5IndexTombstoneAdd CDecl Alias "fts5IndexTombstoneAdd" (ByVal arg
         local2 = c2fb_temp_5
     End If
     fts5IndexTombstoneRebuild(arg0, arg1, local0, local1, local2, CPtr(c2fb_c_int Ptr, @(local3)), CPtr(c2fb_Fts5Data Ptr Ptr Ptr, @(local4)))
+#ifdef SQLITE_DEBUG
+    If arg0->rc <> SQLITE_OK AndAlso (local3 <> 0 OrElse local4 <> 0) Then _
+        sqlite3DebugAssert(StrPtr(!"p->rc==SQLITE_OK || (nHash==0 && apHash==0)"))
+#endif
     ' C unused-parameter annotation
     If local3 Then
         local5 = Cast(c2fb_c_int, &O0ULL)
@@ -10902,6 +11326,49 @@ Private Sub fts5IntegrityCheckPgidx CDecl Alias "fts5IntegrityCheckPgidx" (ByVal
     c2fb_external_sqlite3Fts5BufferFree(CPtr(c2fb_Fts5Buffer Ptr, @(local2)))
     c2fb_external_sqlite3Fts5BufferFree(CPtr(c2fb_Fts5Buffer Ptr, @(local3)))
 End Sub
+#ifdef SQLITE_DEBUG
+' Confirm reverse and forward doclist-index traversal visit the same entries.
+Private Sub fts5TestDlidxReverse CDecl Alias "fts5TestDlidxReverse" ( _
+    ByVal pIndex As c2fb_Fts5Index Ptr, _
+    ByVal segmentId As c2fb_c_int, _
+    ByVal firstLeaf As c2fb_c_int _
+)
+    Dim pDlidx As c2fb_Fts5DlidxIter Ptr
+    Dim checksumForward As c2fb_uint64 = 13
+    Dim checksumReverse As c2fb_uint64 = 13
+    Dim rowid As c2fb_int64
+    Dim pageNumber As c2fb_c_int
+    Dim stepResult As c2fb_c_int
+
+    pDlidx = fts5DlidxIterInit(pIndex, 0, segmentId, firstLeaf)
+    While fts5DlidxIterEof(pIndex, pDlidx) = 0
+        rowid = fts5DlidxIterRowid(pDlidx)
+        pageNumber = fts5DlidxIterPgno(pDlidx)
+        If pageNumber <= firstLeaf Then _
+            sqlite3DebugAssert(StrPtr(!"pgno>iLeaf"))
+        checksumForward += Cast(c2fb_uint64, _
+            rowid + (Cast(c2fb_int64, pageNumber) Shl 32))
+        stepResult = fts5DlidxIterNext(pIndex, pDlidx)
+    Wend
+    fts5DlidxIterFree(pDlidx)
+
+    pDlidx = fts5DlidxIterInit(pIndex, 1, segmentId, firstLeaf)
+    While fts5DlidxIterEof(pIndex, pDlidx) = 0
+        rowid = fts5DlidxIterRowid(pDlidx)
+        pageNumber = fts5DlidxIterPgno(pDlidx)
+        If pageNumber <= firstLeaf Then _
+            sqlite3DebugAssert(StrPtr(!"fts5DlidxIterPgno(pDlidx)>iLeaf"))
+        checksumReverse += Cast(c2fb_uint64, _
+            rowid + (Cast(c2fb_int64, pageNumber) Shl 32))
+        stepResult = fts5DlidxIterPrev(pIndex, pDlidx)
+    Wend
+    fts5DlidxIterFree(pDlidx)
+
+    If pIndex->rc = SQLITE_OK AndAlso checksumForward <> checksumReverse Then _
+        pIndex->rc = SQLITE_CORRUPT_VTAB
+End Sub
+#endif
+
 Private Sub fts5IndexIntegrityCheckSegment CDecl Alias "fts5IndexIntegrityCheckSegment" (ByVal arg0 As c2fb_Fts5Index Ptr, ByVal arg1 As c2fb_Fts5StructureSegment Ptr)
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_index.c
 ' c2fb source-line: 8504
@@ -11079,6 +11546,9 @@ Private Sub fts5IndexIntegrityCheckSegment CDecl Alias "fts5IndexIntegrityCheckS
             c2fb_temp_15 = Cast(c2fb_c_int, local19)
             local5 = c2fb_temp_15
             fts5DlidxIterFree(local16)
+#ifdef SQLITE_DEBUG
+            fts5TestDlidxReverse(arg0, arg1->iSegid, local10)
+#endif
             ' empty C statement
         Else
             c2fb_temp_16 = Cast(c2fb_c_int, arg1->pgnoLast)
@@ -11128,10 +11598,22 @@ Function sqlite3Fts5IndexIntegrityCheck CDecl Alias "sqlite3Fts5IndexIntegrityCh
     Dim c2fb_temp_8 As c2fb_uint64
     Dim c2fb_temp_9 As Long Ptr
     Dim c2fb_temp_10 As c2fb_c_int
+#ifdef SQLITE_DEBUG
+    Dim debugChecksum As c2fb_uint64
+    Dim debugTerm As c2fb_Fts5Buffer
+    Dim debugTestFailed As c2fb_c_int
+#endif
 
     local0 = CPtr(c2fb_Fts5Config Ptr, arg0->pConfig)->eDetail
     local1 = Cast(c2fb_c_int, &O0ULL)
     local2 = Type<c2fb_Fts5Buffer>( Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL) )
+#ifdef SQLITE_DEBUG
+    debugChecksum = 0
+    debugTerm = Type<c2fb_Fts5Buffer>( _
+        Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL), _
+        Cast(c2fb_c_int, &O0ULL))
+    debugTestFailed = 0
+#endif
     ' C automatic storage declaration
     ' C automatic storage declaration
     ' C automatic storage declaration
@@ -11168,7 +11650,11 @@ Function sqlite3Fts5IndexIntegrityCheck CDecl Alias "sqlite3Fts5IndexIntegrityCh
         local11 = Cast(c2fb_c_int, &O0ULL)
         local12 = fts5MultiIterRowid(local3)
         local13 = CPtr(ZString Ptr, CPtr(Const UByte Ptr, fts5MultiIterTerm(local3, CPtr(c2fb_c_int Ptr, @(local9)))))
-        ' empty C statement
+#ifdef SQLITE_DEBUG
+        fts5TestTerm( _
+            arg0, @debugTerm, CPtr(Const ZString Ptr, local13), local9, _
+            local1, @debugChecksum, @debugTestFailed)
+#endif
         If arg0->rc Then
             Goto c2fb_flow_4
         End If
@@ -11197,7 +11683,10 @@ Function sqlite3Fts5IndexIntegrityCheck CDecl Alias "sqlite3Fts5IndexIntegrityCh
         fts5MultiIterNext(arg0, local3, Cast(c2fb_c_int, &O0ULL), Cast(c2fb_c_int, &O0ULL))
     Wend
     c2fb_flow_4:
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5TestTerm( _
+        arg0, @debugTerm, 0, 0, local1, @debugChecksum, @debugTestFailed)
+#endif
     fts5MultiIterFree(local3)
     If (-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((arg0->rc = Cast(c2fb_c_int, &O0ULL))))) <> 0) AndAlso (arg2 <> 0) AndAlso ((-Cast(c2fb_c_int, ((arg1 <> local1)))) <> 0))))) Then
         c2fb_temp_9 = CPtr(Long Ptr, @(arg0->rc))
@@ -11206,6 +11695,11 @@ Function sqlite3Fts5IndexIntegrityCheck CDecl Alias "sqlite3Fts5IndexIntegrityCh
         c2fb_temp_10 = Cast(c2fb_c_int, (*c2fb_temp_9))
         c2fb_external_sqlite3Fts5ConfigErrmsg(CPtr(c2fb_Fts5Config Ptr, arg0->pConfig), StrPtr(!"fts5: checksum mismatch for table \034%s\034"), CPtr(c2fb_Fts5Config Ptr, arg0->pConfig)->zName)
     End If
+#ifdef SQLITE_DEBUG
+    If arg0->rc = SQLITE_OK AndAlso debugTestFailed <> 0 Then _
+        arg0->rc = sqlite3Fts5Corrupt()
+    c2fb_external_sqlite3Fts5BufferFree(@debugTerm)
+#endif
     fts5StructureRelease(local4)
     c2fb_external_sqlite3Fts5BufferFree(CPtr(c2fb_Fts5Buffer Ptr, @(local2)))
     Return fts5IndexReturn(arg0)

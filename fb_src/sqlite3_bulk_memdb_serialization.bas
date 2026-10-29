@@ -888,6 +888,10 @@ Function sqlite3_serialize CDecl Alias "sqlite3_serialize" (ByVal arg0 As sqlite
     Dim c2fb_temp_25 As Any Ptr
     Dim c2fb_temp_26 As Any Ptr
 
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 Then Return 0
+#endif
+
     ' C automatic storage declaration
     ' C automatic storage declaration
     ' C automatic storage declaration
@@ -1042,6 +1046,11 @@ Function sqlite3_deserialize CDecl Alias "sqlite3_deserialize" (ByVal arg0 As sq
     Dim c2fb_temp_26 As SQLITE_C_UINT Ptr
     Dim c2fb_temp_27 As SQLITE_C_UINT
     Dim c2fb_temp_28 As SQLITE_C_INT
+
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg3 < 0 OrElse arg4 < 0 Then _
+        Return SQLITE_MISUSE
+#endif
 
     ' C automatic storage declaration
     ' C automatic storage declaration

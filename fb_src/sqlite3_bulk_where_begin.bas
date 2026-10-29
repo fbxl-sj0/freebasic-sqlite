@@ -6041,6 +6041,9 @@ Function sqlite3WhereBegin CDecl Alias "sqlite3WhereBegin" (ByVal arg0 As Sqlite
                 If (-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, (((-Cast(SQLITE_C_INT, (((Cast(SQLITE_C_UINT, (local8->wsFlags And Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &H0000000fULL))))) <> Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &O0ULL)))))) AndAlso (-Cast(SQLITE_C_INT, (((Cast(SQLITE_C_UINT, (local8->wsFlags And Cast(SQLITE_C_UINT, (Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, &H00000002ULL) Or Cast(SQLITE_C_INT, &H00008000ULL)))))))) = Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &O0ULL)))))))))) AndAlso (-Cast(SQLITE_C_INT, (((Cast(SQLITE_C_UINT, (local8->wsFlags And Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &H00080000ULL))))) = Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &O0ULL)))))))))) AndAlso (-Cast(SQLITE_C_INT, (((Cast(SQLITE_C_UINT, (local8->wsFlags And Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &H00100000ULL))))) = Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, &O0ULL)))))))))) AndAlso (-Cast(SQLITE_C_INT, (((Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, local2->wctrlFlags) And Cast(SQLITE_C_INT, &H0001ULL)))) = Cast(SQLITE_C_INT, &O0ULL))))))))) AndAlso (-Cast(SQLITE_C_INT, ((Cast(SQLITE_C_INT, local2->eDistinct) <> Cast(SQLITE_C_INT, 2ULL))))))))) Then
                     sqlite3VdbeChangeP5(local3, Cast(SQLITE_C_INT, &H02ULL))
                 End If
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+                sqlite3VdbeComment(local3, StrPtr("%s"), local25->zName)
+#endif
                 ' empty C statement
             End If
         End If

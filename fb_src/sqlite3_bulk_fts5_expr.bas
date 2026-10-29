@@ -39,7 +39,9 @@
 #include once "crt/stdarg.bi"
 
 #include once "sqlite3_types.bi"
+#include once "sqlite3_api_constants.bi"
 #include once "sqlite3_fts5_expr_types.bi"
+#include once "sqlite3_debug_assert.bi"
 
 #ifndef __C2FB_BODY_C_ABI_TYPES__
 #define __C2FB_BODY_C_ABI_TYPES__
@@ -3389,6 +3391,49 @@ End Sub
     Each body retains its upstream file and line comment for traceability.
 '/
 
+#ifdef SQLITE_DEBUG
+' These node types are FTS5 parser token values, not SQL opcode numbers.
+Private Const FTS5_EXPR_NODE_TERM As c2fb_c_int = 4
+Private Const FTS5_EXPR_NODE_STRING As c2fb_c_int = 9
+
+Private Sub assert_expr_depth_ok CDecl Alias "assert_expr_depth_ok" ( _
+    ByVal rc As c2fb_c_int, _
+    ByVal pNode As c2fb_Fts5ExprNode Ptr _
+)
+    If rc <> SQLITE_OK Then Exit Sub
+    If pNode = 0 Then
+        sqlite3DebugAssert(StrPtr(!"p != 0"))
+        Exit Sub
+    End If
+
+    If pNode->eType = FTS5_EXPR_NODE_TERM OrElse _
+       pNode->eType = FTS5_EXPR_NODE_STRING OrElse pNode->eType = 0 Then
+        sqlite3DebugAssertCheck( _
+            pNode->iHeight = 0, StrPtr(!"p->iHeight==0"))
+    Else
+        Dim maxChildHeight As c2fb_c_int = 0
+        Dim childNodes As c2fb_Fts5ExprNode Ptr Ptr = _
+            CPtr(c2fb_Fts5ExprNode Ptr Ptr, _
+                 c2fb_Fts5ExprNode_apChild_tail_ptr(pNode))
+
+        For childIndex As c2fb_c_int = 0 To pNode->nChild - 1
+            Dim pChild As c2fb_Fts5ExprNode Ptr = childNodes[childIndex]
+            If pChild = 0 Then
+                sqlite3DebugAssert(StrPtr(!"pChild != 0"))
+            Else
+                If pChild->iHeight > maxChildHeight Then _
+                    maxChildHeight = pChild->iHeight
+                assert_expr_depth_ok(SQLITE_OK, pChild)
+            End If
+        Next
+
+        sqlite3DebugAssertCheck( _
+            pNode->iHeight = maxChildHeight + 1, _
+            StrPtr(!"p->iHeight==iMaxChild+1"))
+    End If
+End Sub
+#endif
+
 Function sqlite3Fts5ExprNew CDecl Alias "sqlite3Fts5ExprNew" (ByVal arg0 As c2fb_Fts5Config Ptr, ByVal arg1 As c2fb_c_int, ByVal arg2 As c2fb_c_int, ByVal arg3 As Const ZString Ptr, ByVal arg4 As c2fb_Fts5Expr Ptr Ptr, ByVal arg5 As ZString Ptr Ptr) As c2fb_c_int
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_expr.c
 ' c2fb source-line: 271
@@ -3471,6 +3516,12 @@ Function sqlite3Fts5ExprNew CDecl Alias "sqlite3Fts5ExprNew" (ByVal arg0 As c2fb
     Loop While (-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((local0.rc = Cast(c2fb_c_int, &O0ULL))))) <> 0) AndAlso ((-Cast(c2fb_c_int, ((local3 <> Cast(c2fb_c_int, &O0ULL))))) <> 0)))))
     c2fb_flow_0:
     c2fb_external_sqlite3Fts5ParserFree(local4, ProcPtr(fts5ParseFree))
+#ifdef SQLITE_DEBUG
+    sqlite3DebugAssertCheck( _
+        local0.pExpr <> 0 OrElse local0.rc <> SQLITE_OK, _
+        StrPtr(!"sParse.pExpr || sParse.rc!=SQLITE_OK"))
+    assert_expr_depth_ok(local0.rc, local0.pExpr)
+#endif
     ' C unused-parameter annotation
     ' empty C statement
     If (-Cast(c2fb_c_int, ((((-Cast(c2fb_c_int, ((local0.rc = Cast(c2fb_c_int, &O0ULL))))) <> 0) AndAlso ((-Cast(c2fb_c_int, ((arg2 < arg0->nCol)))) <> 0))))) Then

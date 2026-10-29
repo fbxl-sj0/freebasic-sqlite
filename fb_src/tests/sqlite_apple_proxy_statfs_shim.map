@@ -1,0 +1,12 @@
+/*
+    Project: SQLite FreeBASIC port
+    File: sqlite_apple_proxy_statfs_shim.map
+    Purpose: Let the Linux simulation shim replace the versioned glibc write
+             reference used by the Apple-profile FreeBASIC Unix VFS.
+*/
+
+GLIBC_2.2.5 {
+    global: write;
+};
+
+/* end of sqlite_apple_proxy_statfs_shim.map */

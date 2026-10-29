@@ -34,7 +34,8 @@
 
     This file intentionally does NOT contain:
 
-        - Remaining global tuning options not supported by the FreeBASIC ABI.
+        - Allocator, mutex, and page-cache method implementations, which live
+          in their dedicated subsystem modules.
 '/
 
 #lang "fb"
@@ -166,8 +167,8 @@ Function sqlite3_test_set_sorter_fakeheap CDecl Alias "sqlite3_test_set_sorter_f
 ) As SQLITE_C_INT Export
     If enabled <> 0 Then
         If sqlite3ConfigHeapBuffer = 0 Then _
-            sqlite3ConfigHeapBuffer = CPtr(Any Ptr, CLngInt(-1))
-    ElseIf sqlite3ConfigHeapBuffer = CPtr(Any Ptr, CLngInt(-1)) Then
+            sqlite3ConfigHeapBuffer = CPtr(Any Ptr, Cast(SQLITE_SIZE_T, -1))
+    ElseIf sqlite3ConfigHeapBuffer = CPtr(Any Ptr, Cast(SQLITE_SIZE_T, -1)) Then
         sqlite3ConfigHeapBuffer = 0
     End If
 #ifdef SQLITE3_FB_TEST_CONFIG_SYNC

@@ -802,10 +802,18 @@ Private Function createModule CDecl Alias "createModule" (ByVal arg0 As sqlite3 
 End Function
 
 Function sqlite3_create_module CDecl Alias "sqlite3_create_module" (ByVal arg0 As sqlite3 Ptr, ByVal arg1 As Const ZString Ptr, ByVal arg2 As Any Ptr, ByVal arg3 As Any Ptr) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg1 = 0 Then _
+        Return SQLITE_MISUSE
+#endif
     Return createModule(arg0, arg1, arg2, arg3, Cast(SQLITE_C_INT, &O0ULL))
 End Function
 
 Function sqlite3_create_module_v2 CDecl Alias "sqlite3_create_module_v2" (ByVal arg0 As sqlite3 Ptr, ByVal arg1 As Const ZString Ptr, ByVal arg2 As Any Ptr, ByVal arg3 As Any Ptr, ByVal arg4 As Sub CDecl(ByVal arg0 As Any Ptr)) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If sqlite3SafetyCheckOk(arg0) = 0 OrElse arg1 = 0 Then _
+        Return SQLITE_MISUSE
+#endif
     Return createModule(arg0, arg1, arg2, arg3, arg4)
 End Function
 

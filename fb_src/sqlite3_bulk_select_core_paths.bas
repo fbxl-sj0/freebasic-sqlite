@@ -3164,7 +3164,7 @@ Private Function multiSelectByMerge CDecl Alias "multiSelectByMerge" (ByVal arg0
     ' empty C statement
     sqlite3VdbeResolveLabel(local5, local28)
     If local3->pPrior Then
-        c2fb_temp_121 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), ProcPtr(sqlite3SelectDeleteGeneric), CPtr(Any Ptr, local3->pPrior)))
+        c2fb_temp_121 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3SelectDeleteGeneric)), CPtr(Any Ptr, local3->pPrior)))
     End If
     c2fb_temp_122 = CPtr(SqliteSelect Ptr Ptr, @(local3->pPrior))
     c2fb_temp_123 = local2
@@ -4103,7 +4103,7 @@ Private Function flattenSubquery CDecl Alias "flattenSubquery" (ByVal arg0 As Sq
         local21 = local11->pSTab
         If (-Cast(SQLITE_C_INT, ((local21->nTabRef = Cast(SQLITE_C_UINT, Cast(SQLITE_C_INT, 1ULL)))))) Then
             local22 = (IIf((arg0)->pToplevel, (arg0)->pToplevel, (arg0)))
-            c2fb_temp_57 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, local22), ProcPtr(sqlite3DeleteTableGeneric), CPtr(Any Ptr, local21)))
+            c2fb_temp_57 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, local22), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3DeleteTableGeneric)), CPtr(Any Ptr, local21)))
             ' empty C statement
         Else
             c2fb_temp_58 = CPtr(u32 Ptr, @(local21->nTabRef))
@@ -4779,7 +4779,7 @@ Private Function countOfViewOptimization CDecl Alias "countOfViewOptimization" (
         c2fb_temp_19 = CPtr(Short Ptr, @(local0->nSelectRow))
         c2fb_temp_20 = Cast(Short, Cast(SQLITE_C_INT, &O0ULL))
         (*c2fb_temp_19) = c2fb_temp_20
-        c2fb_temp_21 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), ProcPtr(sqlite3ExprListDeleteGeneric), CPtr(Any Ptr, local0->pEList)))
+        c2fb_temp_21 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3ExprListDeleteGeneric)), CPtr(Any Ptr, local0->pEList)))
         c2fb_temp_22 = IIf(local1, CPtr(SqliteExpr Ptr, sqlite3ExprDup(CPtr(Any Ptr, local4), CPtr(Any Ptr, local3), Cast(SQLITE_C_INT, &O0ULL))), local3)
         local6 = c2fb_temp_22
         c2fb_temp_23 = CPtr(SqliteExprList Ptr Ptr, @(local0->pEList))

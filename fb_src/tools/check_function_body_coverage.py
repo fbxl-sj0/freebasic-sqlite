@@ -11,7 +11,7 @@ Purpose:
 
 Responsibilities:
 
-    - Read PORTING_FUNCTIONS.csv and verify each row's port status.
+    - Read a selected function index and verify its body and scope status.
     - Match C names to FreeBASIC Function/Sub names or their C ABI Alias.
     - Include procedure bodies kept in .bi files while excluding generated
       build output and unintegrated candidate conversions.
@@ -38,6 +38,12 @@ PROCEDURE_RE = re.compile(
     re.IGNORECASE,
 )
 ALIAS_RE = re.compile(r"\bAlias\s+[\"']([^\"']+)[\"']", re.IGNORECASE)
+ALLOWED_ABSENT_STATUSES = {
+    "Test support left in C",
+    "Disabled upstream",
+    "Loadable extension entry point",
+    "Optional instrumentation",
+}
 
 
 def find_procedure_names(root: Path) -> dict[str, list[str]]:
@@ -75,7 +81,19 @@ def find_procedure_names(root: Path) -> dict[str, list[str]]:
 
 def main() -> int:
     root = Path(__file__).resolve().parent.parent
-    inventory_path = root / "PORTING_FUNCTIONS.csv"
+    if len(sys.argv) > 2:
+        print(
+            "usage: check_function_body_coverage.py [functions.csv]",
+            file=sys.stderr,
+        )
+        return 2
+
+    if len(sys.argv) == 2:
+        inventory_path = Path(sys.argv[1])
+        if not inventory_path.is_absolute():
+            inventory_path = Path.cwd() / inventory_path
+    else:
+        inventory_path = root / "PORTING_FUNCTIONS.csv"
 
     try:
         with inventory_path.open(newline="", encoding="utf-8") as inventory_file:
@@ -89,39 +107,56 @@ def main() -> int:
         return 2
 
     implementation_names = find_procedure_names(root)
-    missing = [
+    missing_body = [
         row
         for row in rows
-        if (row.get("Function") or "").lower() not in implementation_names
+        if row.get("Port status") == "FB body present"
+        and (row.get("Function") or "").lower() not in implementation_names
     ]
-    incomplete_status = [
-        row for row in rows if row.get("Port status") != "FB body present"
+    pending = [row for row in rows if row.get("Port status") == "Needs debug port"]
+    invalid_status = [
+        row
+        for row in rows
+        if row.get("Port status") not in {
+            "FB body present",
+            "Needs debug port",
+            *ALLOWED_ABSENT_STATUSES,
+        }
     ]
+    exclusions = {
+        status: sum(row.get("Port status") == status for row in rows)
+        for status in sorted(ALLOWED_ABSENT_STATUSES)
+        if any(row.get("Port status") == status for row in rows)
+    }
 
-    matched_count = len(rows) - len(missing)
+    present_count = sum(row.get("Port status") == "FB body present" for row in rows)
+    matched_count = present_count - len(missing_body)
+    print(f"Function index: {inventory_path}")
     print(f"Indexed upstream function rows: {len(rows)}")
-    print(f"Rows marked FB body present: {len(rows) - len(incomplete_status)}")
+    print(f"Rows marked FB body present: {present_count}")
     print(f"Rows matched by name or C ABI Alias: {matched_count}")
-    print(f"Unmatched rows: {len(missing)}")
+    print(f"Missing in-scope bodies: {len(pending) + len(missing_body)}")
+    for status, count in exclusions.items():
+        print(f"Classified absent ({status}): {count}")
 
-    if missing:
+    if pending or missing_body:
         print("Missing procedure definitions:", file=sys.stderr)
-        for row in missing:
+        for row in pending + missing_body:
             print(
                 f"  {row.get('Upstream source')}:{row.get('Start line')} "
-                f"{row.get('Function')}",
+                f"{row.get('Function')}: {row.get('Port status')}",
                 file=sys.stderr,
             )
-    if incomplete_status:
-        print("Rows without completed port status:", file=sys.stderr)
-        for row in incomplete_status:
+    if invalid_status:
+        print("Rows with an unrecognized port status:", file=sys.stderr)
+        for row in invalid_status:
             print(
                 f"  {row.get('Upstream source')}:{row.get('Start line')} "
                 f"{row.get('Function')}: {row.get('Port status')}",
                 file=sys.stderr,
             )
 
-    return 1 if missing or incomplete_status else 0
+    return 1 if pending or missing_body or invalid_status else 0
 
 
 if __name__ == "__main__":

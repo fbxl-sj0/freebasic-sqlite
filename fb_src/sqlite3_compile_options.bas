@@ -384,6 +384,7 @@ Dim Shared As Const ZString * 40 sqlite3CompileOptionNames(0 To 72) = _
 #endif
 
 #ifndef SQLITE_OMIT_COMPILEOPTION_DIAGS
+' Keep these conditional extras in lexical order for PRAGMA compile_options.
 Dim Shared As Const ZString Ptr sqlite3CompileOptionPointers(0 To SQLITE_COMPILEOPTION_COUNT - 1) = _
     { _
         @sqlite3CompileOptionNames(0), _
@@ -416,8 +417,8 @@ Dim Shared As Const ZString Ptr sqlite3CompileOptionPointers(0 To SQLITE_COMPILE
         SQLITE_COMPILEOPTION_SESSION_EXTRA _
         SQLITE_COMPILEOPTION_SNAPSHOT_EXTRA _
         SQLITE_COMPILEOPTION_STAT4_EXTRA _
-        SQLITE_COMPILEOPTION_SCANSTATUS_EXTRA _
         SQLITE_COMPILEOPTION_STMTVTAB_EXTRA _
+        SQLITE_COMPILEOPTION_SCANSTATUS_EXTRA _
         SQLITE_COMPILEOPTION_UNLOCK_NOTIFY_EXTRA _
         SQLITE_COMPILEOPTION_UPDATE_DELETE_LIMIT_EXTRA _
         SQLITE_COMPILEOPTION_URI_EXTRA _

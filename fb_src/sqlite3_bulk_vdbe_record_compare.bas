@@ -987,6 +987,9 @@ Function sqlite3VdbeAllocUnpackedRecord CDecl Alias "sqlite3VdbeAllocUnpackedRec
     c2fb_temp_6 = CPtr(UShort Ptr, @(local0->nField))
     c2fb_temp_7 = Cast(UShort, Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, arg0->nKeyField) + Cast(SQLITE_C_INT, 1ULL))))
     (*c2fb_temp_6) = c2fb_temp_7
+    ' A new unpacked record has no comparison history. Initialize the sticky
+    ' error output here; later unpacks must preserve comparator errors.
+    local0->errCode = SQLITE_OK
     Return local0
 End Function
 
@@ -1207,7 +1210,7 @@ Function sqlite3VdbeFindCompare CDecl Alias "sqlite3VdbeFindCompare" (ByVal arg0
         local0 = arg0->aMem[Cast(SQLITE_C_INT, &O0ULL)].flags
         If CPtr(sqlite3VdbeKeyInfoPrefix Ptr, arg0->pKeyInfo)->aSortFlags[Cast(SQLITE_C_INT, &O0ULL)] Then
             If Cast(SQLITE_C_INT, (Cast(SQLITE_C_INT, CPtr(sqlite3VdbeKeyInfoPrefix Ptr, arg0->pKeyInfo)->aSortFlags[Cast(SQLITE_C_INT, &O0ULL)]) And Cast(SQLITE_C_INT, &H02ULL))) Then
-                Return ProcPtr(sqlite3VdbeRecordCompare)
+                Return CPtr(c2fb_callback_23, ProcPtr(sqlite3VdbeRecordCompare))
             End If
             c2fb_temp_0 = CPtr(Byte Ptr, @(arg0->r1))
             c2fb_temp_1 = Cast(Byte, Cast(SQLITE_C_INT, 1ULL))
@@ -1251,7 +1254,7 @@ Function sqlite3VdbeFindCompare CDecl Alias "sqlite3VdbeFindCompare" (ByVal arg0
 #endif
         End If
     End If
-    Return ProcPtr(sqlite3VdbeRecordCompare)
+    Return CPtr(c2fb_callback_23, ProcPtr(sqlite3VdbeRecordCompare))
 End Function
 
 Function sqlite3VdbeIdxRowid CDecl Alias "sqlite3VdbeIdxRowid" (ByVal arg0 As sqlite3 Ptr, ByVal arg1 As BtCursor Ptr, ByVal arg2 As sqlite3_int64 Ptr) As SQLITE_C_INT

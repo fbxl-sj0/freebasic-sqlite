@@ -89,6 +89,17 @@ Declare Function sqlite3CompareAffinity CDecl Alias "sqlite3CompareAffinity" ( _
     ByVal pExpr As Const SqliteExpr Ptr, _
     ByVal otherAffinity As Byte _
 ) As Byte
+Declare Function sqlite3ExprCodeTarget CDecl Alias "sqlite3ExprCodeTarget" ( _
+    ByVal pParse As Any Ptr, _
+    ByVal pExpr As Any Ptr, _
+    ByVal targetRegister As SQLITE_C_INT _
+) As SQLITE_C_INT
+Declare Sub sqlite3ExprCodeMove CDecl Alias "sqlite3ExprCodeMove" ( _
+    ByVal pParse As SqliteParseContext Ptr, _
+    ByVal firstSourceRegister As SQLITE_C_INT, _
+    ByVal firstTargetRegister As SQLITE_C_INT, _
+    ByVal registerCount As SQLITE_C_INT _
+)
 
 Declare Sub sqlite3SelectPrep CDecl Alias "sqlite3SelectPrep" ( _
     ByVal pParse As SqliteParseContext Ptr, _
@@ -2504,7 +2515,7 @@ Private Function sqlite3SelectEmitAggregateResultRow( _
         Return SQLITE_OK
     End If
 
-    If limitRegister <> 0 Then
+    If limitRegister <> 0 AndAlso pSelect->pGroupBy <> 0 Then
         If skipResultLabel = 0 Then skipResultLabel = sqlite3VdbeMakeLabel(pParse)
         If skipResultLabel = 0 Then Return SQLITE_NOMEM
         sqlite3VdbeAddOp2(pVdbe, OP_IfNot, limitRegister, skipResultLabel)
@@ -2513,24 +2524,47 @@ Private Function sqlite3SelectEmitAggregateResultRow( _
         If skipResultLabel = 0 Then skipResultLabel = sqlite3VdbeMakeLabel(pParse)
         If skipResultLabel = 0 Then Return SQLITE_NOMEM
         sqlite3VdbeAddOp3(pVdbe, OP_IfPos, offsetRegister, skipResultLabel, 1)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        sqlite3VdbeComment(pVdbe, StrPtr("OFFSET"))
+#endif
     End If
 
     For resultIndex As SQLITE_C_INT = 0 To nColumn - 1
         Dim pItem As SqliteExprListItem Ptr = _
             sqlite3ExprListItemAt(pResultList, resultIndex)
         If pItem = 0 OrElse pItem->pExpr = 0 Then Return SQLITE_CORRUPT
-        sqlite3ExprCode( _
-            pParse, CPtr(SqliteExpr Ptr, pItem->pExpr), _
-            firstResultRegister + resultIndex)
-        If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
-        If pParse->nErr <> 0 Then Return SQLITE_ERROR
+        If pDestination->eDest = SRT_Mem Then
+            Dim targetRegister As SQLITE_C_INT = _
+                firstResultRegister + resultIndex
+            Dim sourceRegister As SQLITE_C_INT = sqlite3ExprCodeTarget( _
+                pParse, CPtr(SqliteExpr Ptr, pItem->pExpr), targetRegister)
+            If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
+            If pParse->nErr <> 0 Then Return SQLITE_ERROR
+            If sourceRegister <= 0 Then Return SQLITE_ERROR
+            If sourceRegister <> targetRegister Then _
+                sqlite3VdbeAddOp2(pVdbe, OP_Copy, sourceRegister, targetRegister)
+        Else
+            sqlite3ExprCode( _
+                pParse, CPtr(SqliteExpr Ptr, pItem->pExpr), _
+                firstResultRegister + resultIndex)
+            If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
+            If pParse->nErr <> 0 Then Return SQLITE_ERROR
+        End If
     Next
 
     Dim storeResult As SQLITE_C_INT = sqlite3SelectStoreResultRow( _
         pParse, pDestination, firstResultRegister, nColumn)
     If storeResult <> SQLITE_OK Then Return storeResult
-    If limitRegister <> 0 Then _
-        sqlite3VdbeAddOp2(pVdbe, OP_AddImm, limitRegister, -1)
+    If limitRegister <> 0 Then
+        If skipResultLabel = 0 Then skipResultLabel = sqlite3VdbeMakeLabel(pParse)
+        If skipResultLabel = 0 Then Return SQLITE_NOMEM
+        If pSelect->pGroupBy <> 0 Then
+            sqlite3VdbeAddOp2(pVdbe, OP_AddImm, limitRegister, -1)
+        Else
+            sqlite3VdbeAddOp2( _
+                pVdbe, OP_DecrJumpZero, limitRegister, skipResultLabel)
+        End If
+    End If
     If pVdbe->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
     If skipResultLabel <> 0 Then sqlite3VdbeResolveLabel(pVdbe, skipResultLabel)
     Return SQLITE_OK
@@ -2730,10 +2764,29 @@ Private Function sqlite3SelectCompileSimpleAggregateFromClause( _
             Return SQLITE_CORRUPT
         limitRegister = sqlite3SelectNextRegister(pParse)
         If limitRegister = 0 Then Return SQLITE_NOMEM
+        Dim limitLiteralValue As SQLITE_C_INT = 0
+        Dim limitIsLiteral As SQLITE_C_INT = sqlite3ExprIsInteger( _
+            CPtr(Any Ptr, pLimit->pLeft), @limitLiteralValue, pParse, 0)
         sqlite3ExprCode(pParse, CPtr(SqliteExpr Ptr, pLimit->pLeft), limitRegister)
         If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
         If pParse->nErr <> 0 Then Return SQLITE_ERROR
-        sqlite3VdbeAddOp1(pVdbe, OP_MustBeInt, limitRegister)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+        If limitIsLiteral <> 0 Then _
+            sqlite3VdbeComment(pVdbe, StrPtr("LIMIT counter"))
+#endif
+        If limitIsLiteral <> 0 Then
+            If limitLiteralValue = 0 Then _
+                limitJumpAddress = sqlite3VdbeAddOp0(pVdbe, OP_Goto)
+        Else
+            sqlite3VdbeAddOp1(pVdbe, OP_MustBeInt, limitRegister)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            sqlite3VdbeComment(pVdbe, StrPtr("LIMIT counter"))
+#endif
+            sqlite3MayAbort(pParse)
+            limitJumpAddress = sqlite3VdbeAddOp2( _
+                pVdbe, OP_IfNot, limitRegister, _
+                sqlite3VdbeCurrentAddr(pVdbe) + 1)
+        End If
 
         If pLimit->pRight <> 0 Then
             offsetRegister = sqlite3SelectNextRegister(pParse)
@@ -2749,17 +2802,20 @@ Private Function sqlite3SelectCompileSimpleAggregateFromClause( _
             If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
             If pParse->nErr <> 0 Then Return SQLITE_ERROR
             sqlite3VdbeAddOp1(pVdbe, OP_MustBeInt, offsetRegister)
+            sqlite3MayAbort(pParse)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            sqlite3VdbeComment(pVdbe, StrPtr("OFFSET counter"))
+#endif
             sqlite3VdbeAddOp3( _
                 pVdbe, OP_OffsetLimit, limitRegister, _
                 offsetLimitRegister, offsetRegister)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+            sqlite3VdbeComment(pVdbe, StrPtr("LIMIT+OFFSET"))
+#endif
         End If
 
-        ' LIMIT zero skips aggregate input processing as well as result output.
-        limitJumpAddress = sqlite3VdbeAddOp2( _
-            pVdbe, OP_IfNot, limitRegister, _
-            sqlite3VdbeCurrentAddr(pVdbe) + 1)
         If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
-        If pParse->nErr <> 0 OrElse limitJumpAddress < 0 Then Return SQLITE_ERROR
+        If pParse->nErr <> 0 Then Return SQLITE_ERROR
     End If
 
     For functionIndex As SQLITE_C_INT = 0 To pAggregateInfo->nFunc - 1
@@ -2861,10 +2917,20 @@ Private Function sqlite3SelectCompileSimpleAggregateFromClause( _
         If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
         If pParse->nErr <> 0 Then Return SQLITE_ERROR
 
-        If pParse->nMem < 0 OrElse _
-           nColumn > SQLITE_MAX_VDBE_OP - pParse->nMem Then Return SQLITE_TOOBIG
-        Dim firstCountResultRegister As SQLITE_C_INT = pParse->nMem + 1
-        pParse->nMem += nColumn
+        Dim firstCountResultRegister As SQLITE_C_INT
+        If pDestination->eDest = SRT_Mem Then
+            If pDestination->iSDParm <= 0 OrElse _
+               pDestination->nSdst <> nColumn OrElse _
+               pDestination->iSDParm > pParse->nMem - nColumn + 1 Then _
+                Return SQLITE_CORRUPT
+            firstCountResultRegister = pDestination->iSDParm
+        Else
+            If pParse->nMem < 0 OrElse _
+               nColumn > SQLITE_MAX_VDBE_OP - pParse->nMem Then _
+                Return SQLITE_TOOBIG
+            firstCountResultRegister = pParse->nMem + 1
+            pParse->nMem += nColumn
+        End If
         Dim countResultCode As SQLITE_C_INT = sqlite3SelectEmitAggregateResultRow( _
             pParse, pSelect, pResultList, pDestination, _
             CPtr(SqliteExpr Ptr, pSelect->pHaving), _
@@ -2980,10 +3046,19 @@ Private Function sqlite3SelectCompileSimpleAggregateFromClause( _
     If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
     If pParse->nErr <> 0 Then Return SQLITE_ERROR
 
-    If pParse->nMem < 0 OrElse _
-       nColumn > SQLITE_MAX_VDBE_OP - pParse->nMem Then Return SQLITE_TOOBIG
-    Dim firstResultRegister As SQLITE_C_INT = pParse->nMem + 1
-    pParse->nMem += nColumn
+    Dim firstResultRegister As SQLITE_C_INT
+    If pDestination->eDest = SRT_Mem Then
+        If pDestination->iSDParm <= 0 OrElse _
+           pDestination->nSdst <> nColumn OrElse _
+           pDestination->iSDParm > pParse->nMem - nColumn + 1 Then _
+            Return SQLITE_CORRUPT
+        firstResultRegister = pDestination->iSDParm
+    Else
+        If pParse->nMem < 0 OrElse _
+           nColumn > SQLITE_MAX_VDBE_OP - pParse->nMem Then Return SQLITE_TOOBIG
+        firstResultRegister = pParse->nMem + 1
+        pParse->nMem += nColumn
+    End If
     Dim resultCode As SQLITE_C_INT = sqlite3SelectEmitAggregateResultRow( _
         pParse, pSelect, pResultList, pDestination, _
         CPtr(SqliteExpr Ptr, pSelect->pHaving), _
@@ -3111,11 +3186,10 @@ Private Function sqlite3SelectEmitOrderedGroupInputRow( _
     sqlite3VdbeAddInt64(pVdbe, groupHasRowsRegister, 0)
 
     sqlite3VdbeResolveLabel(pVdbe, initializeGroupLabel)
-    For groupIndex As SQLITE_C_INT = 0 To pGroupBy->nExpr - 1
-        sqlite3VdbeAddOp2( _
-            pVdbe, OP_Copy, currentGroupRegister + groupIndex, _
-            previousGroupRegister + groupIndex)
-    Next
+    ' The current key is no longer needed after the comparison. Move it into
+    ' the saved-key range so VDBE values release their previous references.
+    sqlite3ExprCodeMove( _
+        pParse, currentGroupRegister, previousGroupRegister, pGroupBy->nExpr)
     Dim aggregateUpdateAddress As SQLITE_C_INT = sqlite3VdbeCurrentAddr(pVdbe)
     sqlite3VdbeChangeP1(pVdbe, groupJumpAddress, groupChangeAddress)
     sqlite3VdbeChangeP2(pVdbe, groupJumpAddress, aggregateUpdateAddress)
@@ -3311,7 +3385,7 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
 
     Dim limitRegister As SQLITE_C_INT = pSelect->iLimit
     Dim offsetRegister As SQLITE_C_INT = pSelect->iOffset
-    Dim skipSourceScanLabel As SQLITE_C_INT = 0
+    Dim limitZeroExitLabel As SQLITE_C_INT = 0
     Dim pLimit As SqliteExpr Ptr = CPtr(SqliteExpr Ptr, pSelect->pLimit)
     If limitRegister = 0 AndAlso pLimit <> 0 Then
         If pLimit->op <> TK_LIMIT OrElse pLimit->pLeft = 0 Then _
@@ -3341,19 +3415,16 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
                 pVdbe, OP_OffsetLimit, limitRegister, _
                 offsetLimitRegister, offsetRegister)
         End If
-
-        skipSourceScanLabel = sqlite3VdbeMakeLabel(pParse)
-        If skipSourceScanLabel = 0 Then Return SQLITE_NOMEM
-        sqlite3VdbeAddOp2( _
-            pVdbe, OP_IfNot, limitRegister, skipSourceScanLabel)
     End If
+
+    ' Do not jump around grouped-query setup when LIMIT is zero. The ORDER BY
+    ' and GROUP BY sort tails still run on empty cursors, so their open opcodes
+    ' must execute even when no result row can be returned.
 
     Dim registerBase As SQLITE_C_INT = sqlite3GetTempRange( _
         pParse, sortingRegisterCapacity)
     Dim recordRegister As SQLITE_C_INT = sqlite3GetTempReg(pParse)
     If registerBase = 0 OrElse recordRegister = 0 Then
-        If skipSourceScanLabel <> 0 Then _
-            sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
         Return SQLITE_NOMEM
     End If
 
@@ -3464,6 +3535,16 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
     If pParse->db->mallocFailed <> 0 OrElse pseudoOpenAddress < 0 Then _
         Return SQLITE_NOMEM
 
+    ' Open the grouped and output sort cursors before taking the LIMIT-zero
+    ' exit. The jump skips source evaluation and both sort loops, then resumes
+    ' after the ORDER BY tail at the end of this SELECT code generator.
+    If limitRegister <> 0 Then
+        limitZeroExitLabel = sqlite3VdbeMakeLabel(pParse)
+        If limitZeroExitLabel = 0 Then Return SQLITE_NOMEM
+        sqlite3VdbeAddOp2( _
+            pVdbe, OP_IfNot, limitRegister, limitZeroExitLabel)
+    End If
+
     Dim pWhereInfo As SqliteWhereInfo Ptr = 0
     Dim noGroupRowLabel As SQLITE_C_INT = 0
     Dim pAggregateDistinctList As SqliteExprList Ptr = 0
@@ -3523,8 +3604,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
         If pWhereInfo = 0 Then
             If pAggregateDistinctList <> 0 Then _
                 sqlite3ExprListDelete(pParse->db, pAggregateDistinctList)
-            If skipSourceScanLabel <> 0 Then _
-                sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+            If limitZeroExitLabel <> 0 Then _
+                sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
             sqlite3ReleaseTempReg(pParse, recordRegister)
             sqlite3ReleaseTempRange( _
                 pParse, registerBase, sortingRegisterCapacity)
@@ -3564,8 +3645,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
                     pParse, sortingRegisterCapacity)
                 If registerBase = 0 Then
                     sqlite3WhereEnd(pWhereInfo)
-                    If skipSourceScanLabel <> 0 Then _
-                        sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+                    If limitZeroExitLabel <> 0 Then _
+                        sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
                     sqlite3ReleaseTempReg(pParse, recordRegister)
                     Return SQLITE_NOMEM
                 End If
@@ -3613,8 +3694,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
         Dim whereRegister As SQLITE_C_INT = sqlite3SelectNextRegister(pParse)
         noGroupRowLabel = sqlite3VdbeMakeLabel(pParse)
         If whereRegister = 0 OrElse noGroupRowLabel = 0 Then
-            If skipSourceScanLabel <> 0 Then _
-                sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+            If limitZeroExitLabel <> 0 Then _
+                sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
             sqlite3ReleaseTempReg(pParse, recordRegister)
             sqlite3ReleaseTempRange( _
                 pParse, registerBase, sortingRegisterCapacity)
@@ -3624,8 +3705,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
             pParse, CPtr(SqliteExpr Ptr, pSelect->pWhere), whereRegister, 0)
         If whereCode <> SQLITE_OK Then
             sqlite3VdbeResolveLabel(pVdbe, noGroupRowLabel)
-            If skipSourceScanLabel <> 0 Then _
-                sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+            If limitZeroExitLabel <> 0 Then _
+                sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
             sqlite3ReleaseTempReg(pParse, recordRegister)
             sqlite3ReleaseTempRange( _
                 pParse, registerBase, sortingRegisterCapacity)
@@ -3677,8 +3758,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
                 If pWhereInfo <> 0 Then sqlite3WhereEnd(pWhereInfo)
                 If noGroupRowLabel <> 0 Then _
                     sqlite3VdbeResolveLabel(pVdbe, noGroupRowLabel)
-                If skipSourceScanLabel <> 0 Then _
-                    sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+                If limitZeroExitLabel <> 0 Then _
+                    sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
                 sqlite3ReleaseTempReg(pParse, recordRegister)
                 sqlite3ReleaseTempRange( _
                     pParse, registerBase, sortingRegisterCapacity)
@@ -3700,8 +3781,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
                     If pWhereInfo <> 0 Then sqlite3WhereEnd(pWhereInfo)
                     If noGroupRowLabel <> 0 Then _
                         sqlite3VdbeResolveLabel(pVdbe, noGroupRowLabel)
-                    If skipSourceScanLabel <> 0 Then _
-                        sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
+                    If limitZeroExitLabel <> 0 Then _
+                        sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
                     sqlite3ReleaseTempReg(pParse, recordRegister)
                     sqlite3ReleaseTempRange( _
                         pParse, registerBase, sortingRegisterCapacity)
@@ -3751,8 +3832,6 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
     sqlite3ReleaseTempReg(pParse, recordRegister)
     sqlite3ReleaseTempRange( _
         pParse, registerBase, sortingRegisterCapacity)
-    If skipSourceScanLabel <> 0 Then _
-        sqlite3VdbeResolveLabel(pVdbe, skipSourceScanLabel)
     If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
     If pParse->nErr <> 0 Then Return SQLITE_ERROR
 
@@ -3841,11 +3920,10 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
         sqlite3VdbeAddInt64(pVdbe, groupHasRowsRegister, 0)
 
         sqlite3VdbeResolveLabel(pVdbe, initializeGroupLabel)
-        For groupIndex As SQLITE_C_INT = 0 To pGroupBy->nExpr - 1
-            sqlite3VdbeAddOp2( _
-                pVdbe, OP_Copy, currentGroupRegister + groupIndex, _
-                previousGroupRegister + groupIndex)
-        Next
+        ' Each sorter row supplies a new key after this transfer. Moving the
+        ' range matches sqlite3ExprCodeMove and clears temporary VDBE values.
+        sqlite3ExprCodeMove( _
+            pParse, currentGroupRegister, previousGroupRegister, pGroupBy->nExpr)
         Dim aggregateUpdateAddress As SQLITE_C_INT = sqlite3VdbeCurrentAddr(pVdbe)
         sqlite3VdbeChangeP1(pVdbe, groupJumpAddress, groupChangeAddress)
         sqlite3VdbeChangeP2(pVdbe, groupJumpAddress, aggregateUpdateAddress)
@@ -3934,6 +4012,8 @@ Private Function sqlite3SelectCompileGroupedAggregateFromClause( _
         If pParse->db->mallocFailed <> 0 Then Return SQLITE_NOMEM
         If pParse->nErr <> 0 Then Return SQLITE_ERROR
     End If
+    If limitZeroExitLabel <> 0 Then _
+        sqlite3VdbeResolveLabel(pVdbe, limitZeroExitLabel)
     sqlite3ReleaseTempReg(pParse, sorterRecordRegister)
     sqlite3ReleaseTempRange(pParse, previousGroupRegister, pGroupBy->nExpr)
     sqlite3ReleaseTempRange(pParse, currentGroupRegister, pGroupBy->nExpr)
@@ -4970,6 +5050,9 @@ Private Sub codeOffset CDecl Alias "codeOffset" ( _
     If pVdbe = 0 OrElse offsetRegister <= 0 Then Exit Sub
     ' OP_IfPos decrements a positive OFFSET counter before continuing.
     sqlite3VdbeAddOp3(pVdbe, OP_IfPos, offsetRegister, continueAddress, 1)
+#ifdef SQLITE_ENABLE_EXPLAIN_COMMENTS
+    sqlite3VdbeComment(pVdbe, StrPtr("OFFSET"))
+#endif
 End Sub
 
 Private Function hasAnchor CDecl Alias "hasAnchor" ( _

@@ -43,6 +43,11 @@
 #include once "sqlite3_fts5_tokenize_types.bi"
 #include once "sqlite3_api_declarations.bi"
 
+Private Type SqliteFts5BuiltinTokenizer
+    zName As Const ZString Ptr
+    x As c2fb_fts5_tokenizer_
+End Type
+
 #ifndef __C2FB_BODY_C_ABI_TYPES__
 #define __C2FB_BODY_C_ABI_TYPES__
 
@@ -2508,12 +2513,7 @@ Function sqlite3Fts5TokenizerPreload CDecl Alias "sqlite3Fts5TokenizerPreload" (
 End Function
 ' Manual registration preserves SQLite's static tokenizer table and v2 porter ABI.
 Function sqlite3Fts5TokenizerInit CDecl Alias "sqlite3Fts5TokenizerInit" (ByVal arg0 As c2fb_fts5_api Ptr) As c2fb_c_int
-    Type BuiltinTokenizer
-        zName As Const ZString Ptr
-        x As c2fb_fts5_tokenizer_
-    End Type
-
-    Dim aBuiltin(0 To 2) As BuiltinTokenizer
+    Dim aBuiltin(0 To 2) As SqliteFts5BuiltinTokenizer
     Dim sPorter As c2fb_fts5_tokenizer_v2_
     Dim rc As c2fb_c_int
     Dim i As c2fb_c_int

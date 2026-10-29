@@ -1899,6 +1899,11 @@ Private Function pager_playback CDecl Alias "pager_playback" (ByVal arg0 As Page
         c2fb_temp_23 = Cast(SQLITE_C_INT, sqlite3PagerSetPagesize(arg0, CPtr(u32 Ptr, CPtr(SQLITE_C_UINT Ptr, @(local10))), Cast(SQLITE_C_INT, (-Cast(SQLITE_C_INT, 1ULL)))))
         local5 = c2fb_temp_23
     End If
+#ifdef SQLITE_DEBUG
+    ' Journal playback restores the database, so clear the Unix VFS's
+    ' transaction-counter change mark before releasing the writer lock.
+    sqlite3OsFileControlHint(arg0->fd, SQLITE_FCNTL_DB_UNCHANGED, 0)
+#endif
     c2fb_temp_24 = @(arg0->changeCountDone)
     c2fb_temp_25 = Cast(UByte, arg0->tempFile)
     (*c2fb_temp_24) = Cast(u8, c2fb_temp_25)

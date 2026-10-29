@@ -4374,6 +4374,9 @@ End Function
 
 Function sqlite3PagerJrnlFile CDecl Alias "sqlite3PagerJrnlFile" (ByVal pPager As Pager Ptr) As sqlite3_file Ptr Export
     If pPager = 0 Then Return 0
+#ifndef SQLITE_OMIT_WAL
+    If pPager->pWal <> 0 Then Return sqlite3WalFile(pPager->pWal)
+#endif
     Return pPager->jfd
 End Function
 

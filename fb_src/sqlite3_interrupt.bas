@@ -20,9 +20,21 @@
 #lang "fb"
 #include once "sqlite3_db_types.bi"
 
+Declare Function sqlite3SafetyCheckOk CDecl Alias "sqlite3SafetyCheckOk" ( _
+    ByVal db As sqlite3 Ptr _
+) As SQLITE_C_INT
+
 Sub sqlite3_interrupt CDecl Alias "sqlite3_interrupt" ( _
     ByVal db As sqlite3 Ptr _
 ) Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If db = 0 Then
+        sqlite3SafetyCheckOk(db)
+        Return
+    End If
+    If db->eOpenState <> SQLITE_STATE_ZOMBIE AndAlso _
+       sqlite3SafetyCheckOk(db) = 0 Then Return
+#endif
     If db = 0 OrElse db->interruptMutex = 0 Then Return
     sqlite3_mutex_enter(db->interruptMutex)
     db->isInterrupted = 1
@@ -42,6 +54,14 @@ End Function
 Function sqlite3_is_interrupted CDecl Alias "sqlite3_is_interrupted" ( _
     ByVal db As sqlite3 Ptr _
 ) As SQLITE_C_INT Export
+#ifdef SQLITE_ENABLE_API_ARMOR
+    If db = 0 Then
+        sqlite3SafetyCheckOk(db)
+        Return 0
+    End If
+    If db->eOpenState <> SQLITE_STATE_ZOMBIE AndAlso _
+       sqlite3SafetyCheckOk(db) = 0 Then Return 0
+#endif
     Return sqlite3InterruptPending(db)
 End Function
 

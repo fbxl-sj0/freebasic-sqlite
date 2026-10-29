@@ -1399,7 +1399,7 @@ Sub existsToJoin CDecl Alias "existsToJoin" (ByVal arg0 As SqliteParseContext Pt
                     c2fb_temp_17 = CPtr(SqliteSrcList Ptr Ptr, @(local1->pSrc))
                     c2fb_temp_18 = CPtr(SqliteSrcList Ptr, Cast(Integer, Cast(SQLITE_C_INT, &O0ULL)))
                     (*c2fb_temp_17) = c2fb_temp_18
-                    c2fb_temp_19 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), ProcPtr(sqlite3SelectDeleteGeneric), CPtr(Any Ptr, local1)))
+                    c2fb_temp_19 = CPtr(Any Ptr, sqlite3ParserAddCleanup(CPtr(Any Ptr, arg0), CPtr(SqliteParserCleanupCallback, ProcPtr(sqlite3SelectDeleteGeneric)), CPtr(Any Ptr, local1)))
                     recomputeColumnsUsed(arg1, CPtr(SqliteSrcItem Ptr, @(arg1->pSrc->a(Cast(SQLITE_C_INT, (arg1->pSrc->nSrc - Cast(SQLITE_C_INT, 1ULL)))))))
                 End If
             End If

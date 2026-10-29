@@ -30,6 +30,12 @@
         - Select database, journal, and WAL creation permissions.
         - Keep journal directory entries durable after file synchronization.
         - Implement Unix shared-library open, symbol lookup, error, and close callbacks.
+        - Keep PRNG seeds repeatable in test builds and source entropy in release builds.
+        - Discard inherited PRNG state when a process opens a database after fork.
+        - Unlink DELETEONCLOSE files immediately unless the target defers unlinking.
+        - Select proxy locking for non-local Apple filesystems using the upstream
+          open flag, preferred-locking option, and environment override.
+        - Record Darwin filesystem flags and work around empty-file FAT inode IDs.
         - Implement Apple proxy conch acquisition, lock-path switching, file controls, and lock callbacks.
         - Implement the Apple AFP VFS and its byte-range lock callbacks.
         - Implement VxWorks canonical file IDs and named-semaphore locking.
@@ -39,7 +45,6 @@
 
         - WAL log and checkpoint processing.
         - Key/value VFS callbacks; sqlite3_os_kv_optional.bas owns that module.
-        - Automatic filesystem-based proxy-locking selection.
         - Windows VFS behavior or optional syscall interception.
 '/
 
@@ -52,10 +57,21 @@
 #include once "sqlite3_straccum.bi"
 #include once "sqlite3_process_globals.bi"
 #include once "sqlite3_os_test.bi"
+#include once "crt/time.bi"
+
+' SQLite enables its extra lock styles by default on Apple platforms.
+#ifndef SQLITE_ENABLE_LOCKING_STYLE
+#ifdef __APPLE__
+#define SQLITE_ENABLE_LOCKING_STYLE 1
+#else
+#define SQLITE_ENABLE_LOCKING_STYLE 0
+#endif
+#endif
 
 Declare Function sqlite3ConfigCoreMutexEnabled CDecl _
     Alias "sqlite3ConfigCoreMutexEnabled" () As SQLITE_C_INT
 
+#ifndef SQLITE3_FB_APPLE_LOCKING_STYLE
 #define SQLITE3_FB_APPLE_LOCKING_STYLE 0
 #ifdef __APPLE__
 #ifdef SQLITE_ENABLE_LOCKING_STYLE
@@ -65,7 +81,26 @@ Declare Function sqlite3ConfigCoreMutexEnabled CDecl _
 #endif
 #endif
 #endif
+#endif
+#ifdef __APPLE__
+' Values from Darwin's sys/mount.h. MNT_LOCAL distinguishes local storage
+' from network filesystems. Darwin reports the FAT workaround bit in fsFlags.
+#define SQLITE3_FB_FSFLAGS_IS_MSDOS &H00000001
+#endif
+#if SQLITE3_FB_APPLE_LOCKING_STYLE
+#define SQLITE3_FB_MNT_LOCAL &H00001000
+#endif
 #include once "sqlite3_debug_assert.bi"
+
+#if SQLITE3_FB_APPLE_LOCKING_STYLE
+Declare Function unixMaybeAutoProxy CDecl ( _
+    ByVal pFile As Any Ptr, _
+    ByVal pVfs As Any Ptr, _
+    ByVal zRequestedPath As Const ZString Ptr, _
+    ByVal flags As SQLITE_C_INT, _
+    ByVal fileSystemFlags As SQLITE_C_UINT _
+) As SQLITE_C_INT
+#endif
 
 #if defined(SQLITE3_FB_OS_KV_OPTIONAL) OrElse defined(SQLITE3_FB_OS_KV_DEFAULT)
 Declare Function sqlite3KvvfsInit CDecl Alias "sqlite3KvvfsInit" () As SQLITE_C_INT
@@ -123,6 +158,7 @@ Declare Function sqlite3_snprintf CDecl Alias "sqlite3_snprintf" ( _
     ... _
 ) As ZString Ptr
 Declare Function unixGetPid CDecl Alias "getpid" () As SQLITE_C_INT
+Declare Function unixTime CDecl Alias "time" (ByVal pTime As time_t Ptr) As time_t
 Declare Function unixDefaultRead CDecl Alias "read" ( _
     ByVal fd As SQLITE_C_INT, _
     ByVal pBuffer As Any Ptr, _
@@ -160,6 +196,15 @@ Declare Function unixDefaultRmdir CDecl Alias "rmdir" (ByVal zPath As Const ZStr
 Declare Function unixUtimes CDecl Alias "utimes" (ByVal zPath As Const ZString Ptr, ByVal pTimes As Any Ptr) As SQLITE_C_INT
 Declare Function unixDefaultGetcwd CDecl Alias "getcwd" (ByVal zBuffer As ZString Ptr, ByVal size As SQLITE_SIZE_T) As ZString Ptr
 Declare Function unixGetenv CDecl Alias "getenv" (ByVal zName As Const ZString Ptr) As Const ZString Ptr
+#if SQLITE3_FB_APPLE_LOCKING_STYLE
+Declare Function unixAtoi CDecl Alias "atoi" (ByVal zText As Const ZString Ptr) As SQLITE_C_INT
+#endif
+#ifdef __APPLE__
+Declare Function unixFstatfs CDecl Alias "fstatfs" ( _
+    ByVal fd As SQLITE_C_INT, _
+    ByVal pStat As Any Ptr _
+) As SQLITE_C_INT
+#endif
 Declare Function unixRealpath CDecl Alias "realpath" (ByVal zPath As Const ZString Ptr, ByVal zResolved As ZString Ptr) As ZString Ptr
 #ifndef SQLITE_OMIT_LOAD_EXTENSION
 Declare Function unixSystemDlOpen CDecl Alias "dlopen" ( _
@@ -407,7 +452,7 @@ Private Dim Shared semIoMethods As sqlite3_io_methods
 #endif
 Private Dim Shared dotlockIoMethods As sqlite3_io_methods
 Private Dim Shared dotlockVfs As sqlite3_vfs
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
 Private Dim Shared flockIoMethods As sqlite3_io_methods
 Private Dim Shared flockVfs As sqlite3_vfs
 #endif
@@ -423,6 +468,8 @@ Private Dim Shared unixNoneVfs As sqlite3_vfs
 Private Dim Shared unixExclVfs As sqlite3_vfs
 Private Dim Shared unixVfsInitialized As u8
 Private Dim Shared unixBigLock As Any Ptr
+' A forked child must not continue with the PRNG state inherited from its parent.
+Private Dim Shared unixRandomnessPid As SQLITE_C_INT
 
 /' ------------------------------------------------------------------------- '/
 /' Overrideable POSIX call wrappers                                           '/
@@ -1224,6 +1271,30 @@ Private Function findInodeInfo( _
         storeLastErrno(pUnix, unixErrno())
         Return SQLITE_IOERR
     End If
+#ifdef __APPLE__
+    ' On OS X, FAT filesystems report a broken inode for empty files. Write
+    ' the database header's first byte before using the inode as a lock key.
+    If statInfo.stSize = 0 AndAlso _
+       (pUnix->fsFlags And SQLITE3_FB_FSFLAGS_IS_MSDOS) <> 0 Then
+        Dim bytesWritten As sqlite3_int64
+        Do
+            bytesWritten = unixWrite(fd, StrPtr("S"), 1)
+            If bytesWritten >= 0 OrElse unixErrno() <> UNIX_EINTR Then Exit Do
+        Loop
+        If bytesWritten <> 1 Then
+            storeLastErrno(pUnix, unixErrno())
+            Return SQLITE_IOERR
+        End If
+        If unixFsync(fd) <> 0 Then
+            storeLastErrno(pUnix, unixErrno())
+            Return SQLITE_IOERR_FSYNC
+        End If
+        If unixFstat(fd, @statInfo) <> 0 Then
+            storeLastErrno(pUnix, unixErrno())
+            Return SQLITE_IOERR
+        End If
+    End If
+#endif
     ppInfo[0] = unixLockInfoAcquire(statInfo.stDev, statInfo.stIno)
 #endif
     If ppInfo[0] = 0 Then Return SQLITE_NOMEM
@@ -1294,6 +1365,7 @@ Private Function unixFileLockInternal(ByVal pFile As UnixFile Ptr, ByVal request
     Dim pInfo As UnixLockInfo Ptr = pFile->pLockInfo
     If pInfo = 0 OrElse pFile->fd < 0 Then Return SQLITE_IOERR_LOCK
     If requested < SQLITE_LOCK_SHARED OrElse requested > SQLITE_LOCK_EXCLUSIVE Then Return SQLITE_MISUSE
+    Dim previousLockLevel As SQLITE_C_INT = pFile->lockLevel
     If requested <= pFile->lockLevel Then Return SQLITE_OK
 
     If pFile->lockLevel < SQLITE_LOCK_SHARED Then
@@ -1360,6 +1432,18 @@ Private Function unixFileLockInternal(ByVal pFile As UnixFile Ptr, ByVal request
         pInfo->pExclusive = pFile
         pFile->lockLevel = SQLITE_LOCK_EXCLUSIVE
     End If
+
+#ifdef SQLITE_DEBUG
+    ' Starting a reserved lock marks the beginning of a normal write. The
+    ' debug VFS later verifies that a database write changes its transaction
+    ' counter before other processes can read the file again.
+    If previousLockLevel <= SQLITE_LOCK_SHARED AndAlso _
+       requested = SQLITE_LOCK_RESERVED Then
+        pFile->transCntrChng = 0
+        pFile->dbUpdate = 0
+        pFile->inNormalWrite = 1
+    End If
+#endif
 
     Return SQLITE_OK
 End Function
@@ -2059,7 +2143,7 @@ Private Function fillInUnixFile CDecl Alias "fillInUnixFile" ( _
 #else
         If pVfs = @dotlockVfs Then
             pLockingStyle = @dotlockIoMethods
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
         ElseIf pVfs = @flockVfs Then
             pLockingStyle = @flockIoMethods
 #endif
@@ -2148,7 +2232,15 @@ Private Function unixOpenFileInternal ( _
 ) As SQLITE_C_INT
 
     If pFile = 0 Then Return SQLITE_MISUSE
+    ' sqlite3_randomness() is process-local state. After fork(), opening a
+    ' database in the child resets that state before the child uses it.
+    Dim processId As SQLITE_C_INT = unixGetPid()
+    If unixRandomnessPid <> processId Then
+        unixRandomnessPid = processId
+        sqlite3_randomness(0, 0)
+    End If
     Dim pUnix As UnixFile Ptr = CPtr(UnixFile Ptr, pFile)
+    Dim zRequestedPath As Const ZString Ptr = zName
     pUnix->pVfs = CPtr(sqlite3_vfs Ptr, pVfs)
     pUnix->fd = -1
     pUnix->reusableFlags = 0
@@ -2170,8 +2262,11 @@ Private Function unixOpenFileInternal ( _
     pUnix->szChunk = 0
     pUnix->sectorSize = 0
     pUnix->deviceCharacteristics = 0
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     pUnix->openFlags = 0
+#endif
+#ifdef __APPLE__
+    pUnix->fsFlags = 0
 #endif
 #ifdef SQLITE_ENABLE_SETLK_TIMEOUT
     pUnix->iBusyTimeout = 0
@@ -2196,6 +2291,9 @@ Private Function unixOpenFileInternal ( _
     Dim fileUid As SQLITE_C_UINT = 0
     Dim fileGid As SQLITE_C_UINT = 0
     Dim openFailureCode As SQLITE_C_INT = SQLITE_OK
+#ifdef __APPLE__
+    Dim fsInfo As UnixStatFs
+#endif
     If zName = 0 Then
         Dim tempNameRc As SQLITE_C_INT = unixGetTempname( _
             UNIX_PATH_MAX - 1, @zNameBuffer)
@@ -2348,7 +2446,7 @@ Private Function unixOpenFileInternal ( _
     pUnix->fd = fd
     pUnix->reusableFlags = flags And _
         (SQLITE_OPEN_READONLY Or SQLITE_OPEN_READWRITE)
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     pUnix->openFlags = unixSystemOpenFlags(flags, openedReadOnly)
 #endif
     pUnix->pDeferred = pDeferred
@@ -2375,6 +2473,34 @@ Private Function unixOpenFileInternal ( _
         unixUriBoolean(zUriFilename, StrPtr("readonly_shm"), 0) <> 0, 1, 0)
     If unixUriBoolean(zUriFilename, StrPtr("psow"), _
                       SQLITE_POWERSAFE_OVERWRITE) <> 0 Then ctrlFlags Or= UNIXFILE_PSOW
+
+#ifdef __APPLE__
+    If unixFstatfs(fd, @fsInfo) = -1 Then
+        storeLastErrno(pUnix, unixErrno())
+        sqlite3_free(pDeferred)
+        pUnix->pDeferred = 0
+        robust_close(pUnix, fd, __LINE__)
+        pUnix->fd = -1
+        If tempFile <> 0 Then unixUnlink(@zNameBuffer)
+        If pUnix->ownsPath <> 0 Then sqlite3_free(pUnix->zPath)
+        pUnix->zPath = 0
+        pUnix->ownsPath = 0
+        Return SQLITE_IOERR_ACCESS
+    End If
+    If (fsInfo.fFstypename(0) = Asc("m") AndAlso _
+        fsInfo.fFstypename(1) = Asc("s") AndAlso _
+        fsInfo.fFstypename(2) = Asc("d") AndAlso _
+        fsInfo.fFstypename(3) = Asc("o") AndAlso _
+        fsInfo.fFstypename(4) = Asc("s")) OrElse _
+       (fsInfo.fFstypename(0) = Asc("e") AndAlso _
+        fsInfo.fFstypename(1) = Asc("x") AndAlso _
+        fsInfo.fFstypename(2) = Asc("f") AndAlso _
+        fsInfo.fFstypename(3) = Asc("a") AndAlso _
+        fsInfo.fFstypename(4) = Asc("t")) Then
+        pUnix->fsFlags = pUnix->fsFlags Or SQLITE3_FB_FSFLAGS_IS_MSDOS
+    End If
+#endif
+
     Dim zFillPath As Const ZString Ptr = pUnix->zPath
     rc = fillInUnixFile(pVfs, fd, pFile, zFillPath, ctrlFlags)
     If rc <> SQLITE_OK Then
@@ -2388,9 +2514,23 @@ Private Function unixOpenFileInternal ( _
         pUnix->ownsPath = 0
         Return rc
     End If
+#if Not defined(OS_VXWORKS) AndAlso Not defined(SQLITE_UNLINK_AFTER_CLOSE)
+    If pUnix->deleteOnClose <> 0 Then
+        ' Crash tests terminate child processes without running close callbacks.
+        ' Unlink now so the next process can reuse the deterministic temp name.
+        unixUnlink(unixPathToZString(CPtr(UByte Ptr, pUnix->zPath)))
+        pUnix->deleteOnClose = 0
+    End If
+#endif
     If pOutFlags <> 0 Then
         pOutFlags[0] = IIf(pUnix->readOnly <> 0, SQLITE_OPEN_READONLY, SQLITE_OPEN_READWRITE)
     End If
+
+#if SQLITE3_FB_APPLE_LOCKING_STYLE
+    rc = unixMaybeAutoProxy( _
+        CPtr(Any Ptr, pUnix), pVfs, zRequestedPath, flags, fsInfo.fFlags)
+    If rc <> SQLITE_OK Then Return rc
+#endif
     Return SQLITE_OK
 End Function
 
@@ -2766,6 +2906,16 @@ Private Function afpUnlock CDecl Alias "afpUnlock" ( _
     Dim skipShared As SQLITE_C_INT = 0
     unixEnterMutex()
 
+    If pUnix->lockLevel > SQLITE_LOCK_SHARED Then
+#ifdef SQLITE_DEBUG
+        sqlite3DebugAssertCheck( _
+            CInt(pUnix->inNormalWrite = 0 OrElse pUnix->dbUpdate = 0 OrElse _
+                 pUnix->transCntrChng = 1), _
+            StrPtr("AFP unlock preserves the database transaction counter"))
+        pUnix->inNormalWrite = 0
+#endif
+    End If
+
     If pUnix->lockLevel > SQLITE_LOCK_SHARED AndAlso _
        pUnix->lockLevel = SQLITE_LOCK_EXCLUSIVE Then
         rc = afpSetLock( _
@@ -2958,6 +3108,41 @@ Private Function unixWriteFile CDecl Alias "unixWrite" ( _
     Dim pUnix As UnixFile Ptr = CPtr(UnixFile Ptr, pFile)
     Dim pIn As Const UByte Ptr = CPtr(Const UByte Ptr, pBuffer)
     If amount = 0 Then Return SQLITE_OK
+#ifdef SQLITE_DEBUG
+    If pUnix->inNormalWrite <> 0 Then
+        pUnix->dbUpdate = 1
+        If offset <= 24 AndAlso offset + amount >= 27 Then
+            Dim writeCounterOffset As SQLITE_C_INT = CInt(24 - offset)
+            Dim bytesFromCounter As SQLITE_C_INT = amount - writeCounterOffset
+            If bytesFromCounter < 4 Then
+                ' A partial overlap still changes the database transaction
+                ' counter. Avoid reading past this short write buffer.
+                pUnix->transCntrChng = 1
+            Else
+                Dim oldCounter(0 To 3) As UByte
+#ifdef SQLITE_TEST
+                sqlite3_io_error_benign = 1
+#endif
+                Dim bytesRead As SQLITE_C_INT = seekAndRead( _
+                    pUnix, 24, @oldCounter(0), 4)
+#ifdef SQLITE_TEST
+                sqlite3_io_error_benign = 0
+#endif
+                Dim counterChanged As SQLITE_C_INT = CInt(bytesRead <> 4)
+                If counterChanged = 0 Then
+                    For counterByte As SQLITE_C_INT = 0 To 3
+                        If oldCounter(counterByte) <> _
+                           pIn[writeCounterOffset + counterByte] Then
+                            counterChanged = 1
+                            Exit For
+                        End If
+                    Next
+                End If
+                If counterChanged <> 0 Then pUnix->transCntrChng = 1
+            End If
+        End If
+    End If
+#endif
     Dim remaining As SQLITE_C_INT = amount
     Dim currentOffset As sqlite3_int64 = offset
     Dim currentBuffer As Const UByte Ptr = pIn
@@ -3011,6 +3196,11 @@ Private Function unixTruncateFile CDecl Alias "unixTruncate" ( _
     If fbTestSimulateIoError() <> 0 Then Return SQLITE_IOERR_TRUNCATE
 #endif
     If robust_ftruncate(pUnix->fd, truncateSize) = 0 Then
+#ifdef SQLITE_DEBUG
+        ' Truncating an open main database to zero also updates its header.
+        If pUnix->inNormalWrite <> 0 AndAlso truncateSize = 0 Then _
+            pUnix->transCntrChng = 1
+#endif
 #if SQLITE_MAX_MMAP_SIZE > 0
         If truncateSize < pUnix->mmapSize Then _
             pUnix->mmapSize = truncateSize
@@ -3025,9 +3215,6 @@ Private Function unixSyncFile CDecl Alias "unixSync" ( _
     ByVal pFile As Any Ptr, ByVal flags As SQLITE_C_INT _
 ) As SQLITE_C_INT
     If pFile = 0 Then Return SQLITE_MISUSE
-#ifdef SQLITE_TEST
-    If fbTestSimulateIoError() <> 0 Then Return SQLITE_IOERR_LOCK
-#endif
     Dim pUnix As UnixFile Ptr = CPtr(UnixFile Ptr, pFile)
 #ifdef SQLITE_TEST
     If fbTestSimulateDiskfull() <> 0 Then Return SQLITE_FULL
@@ -3697,7 +3884,7 @@ Private Function proxyCreateUnixFile CDecl Alias "proxyCreateUnixFile" ( _
     End If
 
     pNew->isMainDb = 0
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     pNew->openFlags = unixSystemOpenFlags( _
         openFlags, CInt(pNew->readOnly <> 0))
 #endif
@@ -4197,6 +4384,47 @@ Private Function proxyTransformUnixFile CDecl Alias "proxyTransformUnixFile" ( _
     Return rc
 End Function
 
+/' Match unixOpen's proxy decision after the ordinary Unix file is initialized.
+   SQLITE_FORCE_PROXY_LOCKING overrides filesystem locality for test and
+   deployment configuration; otherwise only non-local filesystems are proxied. '/
+Private Function unixMaybeAutoProxy CDecl ( _
+    ByVal pFile As Any Ptr, _
+    ByVal pVfs As Any Ptr, _
+    ByVal zRequestedPath As Const ZString Ptr, _
+    ByVal flags As SQLITE_C_INT, _
+    ByVal fileSystemFlags As SQLITE_C_UINT _
+) As SQLITE_C_INT
+    If pFile = 0 OrElse pVfs = 0 Then Return SQLITE_MISUSE
+    Dim pUnix As UnixFile Ptr = CPtr(UnixFile Ptr, pFile)
+    Dim isAutoProxy As SQLITE_C_INT = CInt( _
+        (flags And SQLITE_OPEN_AUTOPROXY) <> 0)
+#ifdef SQLITE_PREFER_PROXY_LOCKING
+#if SQLITE_PREFER_PROXY_LOCKING + 0 <> 0
+    isAutoProxy = 1
+#endif
+#endif
+    If isAutoProxy = 0 OrElse zRequestedPath = 0 OrElse _
+       pUnix->isMainDb = 0 Then Return SQLITE_OK
+
+    Dim pVfsInfo As sqlite3_vfs Ptr = CPtr(sqlite3_vfs Ptr, pVfs)
+    If pVfsInfo->xOpen = 0 Then Return SQLITE_OK
+
+    Dim pForceProxy As Const ZString Ptr = _
+        unixGetenv(StrPtr("SQLITE_FORCE_PROXY_LOCKING"))
+    Dim useProxy As SQLITE_C_INT
+    If pForceProxy <> 0 Then
+        useProxy = IIf(unixAtoi(pForceProxy) > 0, 1, 0)
+    Else
+        useProxy = IIf((fileSystemFlags And SQLITE3_FB_MNT_LOCAL) = 0, 1, 0)
+    End If
+    If useProxy = 0 Then Return SQLITE_OK
+
+    Dim rc As SQLITE_C_INT = _
+        proxyTransformUnixFile(pUnix, StrPtr(":auto:"))
+    If rc <> SQLITE_OK Then unixCloseFile(pFile)
+    Return rc
+End Function
+
 Private Function proxyFileControl CDecl Alias "proxyFileControl" ( _
     ByVal pFile As Any Ptr, _
     ByVal operation As SQLITE_C_INT, _
@@ -4497,7 +4725,7 @@ Private Function dotlockClose CDecl Alias "dotlockClose" ( _
     Return unixCloseFile(pFile)
 End Function
 
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
 ' flock() operations apply to the Linux file descriptor, not SQLite byte ranges.
 Private Function robust_flock CDecl Alias "robust_flock" ( _
     ByVal fd As SQLITE_C_INT, _
@@ -4733,8 +4961,10 @@ Private Function unixFindText( _
 ) As SQLITE_C_INT
     If pText = 0 OrElse zNeedle = 0 OrElse firstByte < 0 OrElse _
        endByte < firstByte Then Return -1
+    ' Treat the needle as bytes so indexing cannot become a numeric string conversion.
+    Dim pNeedle As Const UByte Ptr = CPtr(Const UByte Ptr, zNeedle)
     Dim needleLength As SQLITE_C_INT = 0
-    While zNeedle[needleLength] <> 0
+    While pNeedle[needleLength] <> 0
         needleLength += 1
     Wend
     If needleLength = 0 OrElse needleLength > endByte - firstByte Then Return -1
@@ -4742,7 +4972,7 @@ Private Function unixFindText( _
     For iByte As SQLITE_C_INT = firstByte To endByte - needleLength
         Dim matched As SQLITE_C_INT = 1
         For iNeedle As SQLITE_C_INT = 0 To needleLength - 1
-            If pText[iByte + iNeedle] <> CByte(zNeedle[iNeedle]) Then
+            If pText[iByte + iNeedle] <> pNeedle[iNeedle] Then
                 matched = 0
                 Exit For
             End If
@@ -4758,15 +4988,35 @@ Private Function unixParseLockOffset( _
     ByVal endByte As SQLITE_C_INT _
 ) As sqlite3_int64
     If pText = 0 OrElse firstByte < 0 OrElse endByte <= firstByte Then Return 0
+
+    ' /proc/fdinfo lines end in a newline; accept the same trailing whitespace
+    ' that strtoll accepts in the C implementation.
+    Dim iByte As SQLITE_C_INT = firstByte
+    While iByte < endByte AndAlso _
+          (pText[iByte] = Asc(" ") OrElse pText[iByte] = 9 OrElse _
+           pText[iByte] = 10 OrElse pText[iByte] = 13)
+        iByte += 1
+    Wend
+
     Dim value As sqlite3_int64 = 0
-    For iByte As SQLITE_C_INT = firstByte To endByte - 1
+    Dim digitCount As SQLITE_C_INT = 0
+    While iByte < endByte
         Dim c As UByte = pText[iByte]
-        If c < Asc("0") OrElse c > Asc("9") Then Return 0
+        If c < Asc("0") OrElse c > Asc("9") Then Exit While
         Dim digit As SQLITE_C_INT = c - Asc("0")
         If value > (&H7FFFFFFFFFFFFFFFLL - digit) \ 10 Then _
             Return &H7FFFFFFFFFFFFFFFLL
         value = value * 10 + digit
-    Next
+        digitCount += 1
+        iByte += 1
+    Wend
+    If digitCount = 0 Then Return 0
+    While iByte < endByte
+        Dim c As UByte = pText[iByte]
+        If c <> Asc(" ") AndAlso c <> 9 AndAlso c <> 10 AndAlso c <> 13 Then _
+            Return 0
+        iByte += 1
+    Wend
     Return value
 End Function
 
@@ -4787,11 +5037,14 @@ Private Function unixPosixAdvisoryLocks CDecl Alias "unixPosixAdvisoryLocks" ( _
     Dim fdInfo As SQLITE_C_INT = unixOpen(@zPath, UNIX_OPEN_READONLY, 0)
     If fdInfo < 0 Then Return SQLITE_ERROR_UNABLE
 
-    Dim zText(0 To 1999) As UByte
+    ' Match upstream's fdinfo buffer and reserve its final byte for NUL.
+    Const UNIX_FDINFO_BUFFER_BYTES As SQLITE_C_INT = 2000
+    Dim zText(0 To UNIX_FDINFO_BUFFER_BYTES - 1) As UByte
     Dim nByte As sqlite3_int64 = unixSystemRead( _
-        fdInfo, @zText(0), SizeOf(zText) - 1)
+        fdInfo, @zText(0), UNIX_FDINFO_BUFFER_BYTES - 1)
     unixCloseFd(fdInfo)
-    If nByte <= 0 OrElse nByte >= SizeOf(zText) Then Return SQLITE_ERROR_UNABLE
+    If nByte <= 0 OrElse nByte >= UNIX_FDINFO_BUFFER_BYTES Then _
+        Return SQLITE_ERROR_UNABLE
     zText(CLngInt(nByte)) = 0
 
     Dim zLockPrefix As ZString * 7 = "lock:" & Chr(9)
@@ -4887,8 +5140,8 @@ Private Sub unixDescribeShm( _
             exclusiveMask Or= (1 Shl iLock)
     Next
     unixStrAppendf(pAccum, StrPtr( _
-        !"{\034h\034:%d,\034nRef\034:%u,\034sharedMask\034:%d,\034exclMask\034:%d"), _
-        pNode->fd, pNode->nRef, sharedMask, exclusiveMask)
+        !"{\034h\034:%d,\034nRef\034:%u,\034id\034:%d,\034sharedMask\034:%d,\034exclMask\034:%d"), _
+        pNode->fd, pNode->nRef, pUnix->shmId, sharedMask, exclusiveMask)
     Dim aLock(0 To 15) As UByte
     If unixPosixAdvisoryLocks(pNode->fd, @aLock(0)) = SQLITE_OK Then _
         unixStrAppendf(pAccum, StrPtr(!",\034pal\034:\034%s\034"), _
@@ -4982,6 +5235,12 @@ Private Function unixFileControl(ByVal pFile As Any Ptr, ByVal operation As SQLI
     If operation = SQLITE_FCNTL_FILESTAT Then
         If pArgument = 0 Then Return SQLITE_MISUSE
         Return unixFileStat(pUnix, CPtr(sqlite3_str Ptr, pArgument))
+    End If
+#endif
+#ifdef SQLITE_DEBUG
+    If operation = Cast(SQLITE_C_INT, SQLITE_FCNTL_DB_UNCHANGED) Then
+        pUnix->dbUpdate = 0
+        Return SQLITE_OK
     End If
 #endif
     If operation = SQLITE_FCNTL_LAST_ERRNO Then
@@ -5362,6 +5621,11 @@ Private Function unixOpenSharedMemory CDecl Alias "unixOpenSharedMemory" ( _
 
     pNode->nRef += 1
     pUnix->pShmNode = pNode
+    pUnix->shmId = 0
+#ifdef SQLITE_DEBUG
+    pUnix->shmId = pNode->nextShmId
+    pNode->nextShmId += 1
+#endif
     For i As Long = 0 To SQLITE_SHM_NLOCK - 1
         pUnix->aShmLock(i) = 0
         pUnix->aShmLockCount(i) = 0
@@ -5772,6 +6036,15 @@ End Sub
 Private Function unixRandomness(ByVal pVfs As Any Ptr, ByVal amount As SQLITE_C_INT, ByVal zOutput As ZString Ptr) As SQLITE_C_INT
     If amount <= 0 OrElse zOutput = 0 Then Return 0
     Dim pOutput As UByte Ptr = CPtr(UByte Ptr, zOutput)
+
+    ' Upstream zero-fills this buffer in every build. SQLITE_TEST leaves it
+    ' zeroed so tests start from a repeatable ChaCha seed.
+    For iByte As SQLITE_C_INT = 0 To amount - 1
+        pOutput[iByte] = 0
+    Next
+    unixRandomnessPid = unixGetPid()
+
+#if Not defined(SQLITE_TEST) AndAlso Not defined(SQLITE_OMIT_RANDOMNESS)
     Dim nDone As SQLITE_C_INT = 0
     While nDone < amount
         Dim n As sqlite3_int64 = unixGetrandom(pOutput + nDone, CULng(amount - nDone), 0)
@@ -5779,18 +6052,35 @@ Private Function unixRandomness(ByVal pVfs As Any Ptr, ByVal amount As SQLITE_C_
         If n <= 0 Then Exit While
         nDone += CLng(n)
     Wend
-    If nDone = amount Then Return amount
-
-    Dim fd As SQLITE_C_INT = unixOpen(StrPtr("/dev/urandom"), UNIX_OPEN_READONLY Or UNIX_OPEN_CLOEXEC, 0)
-    If fd < 0 Then Return nDone
-    While nDone < amount
-        Dim n As sqlite3_int64 = unixPread(fd, pOutput + nDone, CULng(amount - nDone), nDone)
-        If n < 0 AndAlso unixErrno() = UNIX_EINTR Then Continue While
-        If n <= 0 Then Exit While
-        nDone += CLng(n)
-    Wend
-    unixCloseFd(fd)
-    Return nDone
+    If nDone < amount Then
+        Dim fd As SQLITE_C_INT = unixOpen(StrPtr("/dev/urandom"), UNIX_OPEN_READONLY Or UNIX_OPEN_CLOEXEC, 0)
+        If fd >= 0 Then
+            While nDone < amount
+                Dim n As sqlite3_int64 = unixSystemRead(fd, pOutput + nDone, CULng(amount - nDone))
+                If n < 0 AndAlso unixErrno() = UNIX_EINTR Then Continue While
+                If n <= 0 Then Exit While
+                nDone += CLng(n)
+            Wend
+            unixCloseFd(fd)
+        End If
+    End If
+    If nDone < amount Then
+        ' Match SQLite's last-resort seed when both kernel entropy interfaces fail.
+        If amount >= SizeOf(time_t) + SizeOf(unixRandomnessPid) Then
+            Dim currentTime As time_t = unixTime(0)
+            Dim pTime As UByte Ptr = CPtr(UByte Ptr, @currentTime)
+            Dim pProcessId As UByte Ptr = CPtr(UByte Ptr, @unixRandomnessPid)
+            For iByte As SQLITE_C_INT = 0 To SizeOf(time_t) - 1
+                pOutput[iByte] = pTime[iByte]
+            Next
+            For iByte As SQLITE_C_INT = 0 To SizeOf(unixRandomnessPid) - 1
+                pOutput[SizeOf(time_t) + iByte] = pProcessId[iByte]
+            Next
+            Return SizeOf(time_t) + SizeOf(unixRandomnessPid)
+        End If
+    End If
+#endif
+    Return amount
 End Function
 
 Private Function unixSleepVfs(ByVal pVfs As Any Ptr, ByVal microseconds As SQLITE_C_INT) As SQLITE_C_INT
@@ -6012,9 +6302,11 @@ Function sqlite3_os_init CDecl Alias "sqlite3_os_init" () As SQLITE_C_INT Export
 #else
     unixInitializeSystemCallTable()
     If SizeOf(UnixFlock) <> 32 OrElse SizeOf(UnixStat) <> 144 Then Return SQLITE_ERROR
+#ifdef __APPLE__
+    If SizeOf(UnixStatFs) <> 2168 Then Return SQLITE_ERROR
+#endif
 #if SQLITE3_FB_APPLE_LOCKING_STYLE
-    If SizeOf(UnixStatFs) <> 2168 OrElse _
-       SizeOf(AfpByteRangeLockPB2) <> 32 Then Return SQLITE_ERROR
+    If SizeOf(AfpByteRangeLockPB2) <> 32 Then Return SQLITE_ERROR
 #endif
     unixBigLock = sqlite3MutexAlloc(SQLITE_MUTEX_STATIC_VFS1)
     ' A null static lock is valid when core mutexes are disabled.
@@ -6077,7 +6369,7 @@ Function sqlite3_os_init CDecl Alias "sqlite3_os_init" () As SQLITE_C_INT Export
     dotlockIoMethods.xFetch = 0
     dotlockIoMethods.xUnfetch = 0
 
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     flockIoMethods.iVersion = 1
     flockIoMethods.xClose = @flockClose
     flockIoMethods.xRead = @unixReadFile
@@ -6195,7 +6487,7 @@ Function sqlite3_os_init CDecl Alias "sqlite3_os_init" () As SQLITE_C_INT Export
         dotlockVfs.zName = StrPtr("unix-dotfile")
         rc = sqlite3_vfs_register(@dotlockVfs, 0)
     End If
-#ifdef SQLITE_ENABLE_LOCKING_STYLE
+#if SQLITE3_FB_ENABLE_LOCKING_STYLE
     If rc = SQLITE_OK Then
         flockVfs = unixVfs
         flockVfs.pNext = 0

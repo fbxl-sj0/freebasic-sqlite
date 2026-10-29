@@ -368,6 +368,86 @@ Declare Function c2fb_external_sqlite3Fts5ExprInstToken CDecl Alias "sqlite3Fts5
 Declare Sub c2fb_external_sqlite3Fts5ExprClearTokens CDecl Alias "sqlite3Fts5ExprClearTokens" (ByVal arg0 As c2fb_Fts5Expr Ptr)
 Declare Function c2fb_external_sqlite3Fts5TokenizerPattern CDecl Alias "sqlite3Fts5TokenizerPattern" (ByVal arg0 As c2fb_callback_91, ByVal arg1 As c2fb_Fts5Tokenizer Ptr) As c2fb_c_int
 Declare Function c2fb_external_sqlite3Fts5TokenizerPreload CDecl Alias "sqlite3Fts5TokenizerPreload" (ByVal arg0 As c2fb_Fts5TokenizerConfig Ptr) As c2fb_c_int
+#ifdef SQLITE_DEBUG
+Private Const FTS5_BEGIN As c2fb_c_int = 1
+Private Const FTS5_SYNC As c2fb_c_int = 2
+Private Const FTS5_COMMIT As c2fb_c_int = 3
+Private Const FTS5_ROLLBACK As c2fb_c_int = 4
+Private Const FTS5_SAVEPOINT As c2fb_c_int = 5
+Private Const FTS5_RELEASE As c2fb_c_int = 6
+Private Const FTS5_ROLLBACKTO As c2fb_c_int = 7
+
+/'
+    Track FTS5 virtual-table transaction callbacks in debug builds.
+
+    This state is diagnostic only. It mirrors SQLite's callback order and
+    lets assertions catch an invalid savepoint or transaction transition.
+'/
+Private Sub fts5CheckTransactionState CDecl Alias "fts5CheckTransactionState" ( _
+    ByVal pTable As c2fb_Fts5FullTable Ptr, _
+    ByVal operation As c2fb_c_int, _
+    ByVal savepointNumber As c2fb_c_int _
+)
+    If pTable = 0 Then
+        sqlite3DebugAssert(StrPtr(!"pTable != 0"))
+        Exit Sub
+    End If
+
+    Select Case operation
+    Case FTS5_BEGIN
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState = 0, StrPtr(!"p->ts.eState==0"))
+        pTable->ts.eState = 1
+        pTable->ts.iSavepoint = -1
+
+    Case FTS5_SYNC
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState = 1 OrElse pTable->ts.eState = 2, _
+            StrPtr(!"p->ts.eState==1 || p->ts.eState==2"))
+        pTable->ts.eState = 2
+
+    Case FTS5_COMMIT
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState = 2, StrPtr(!"p->ts.eState==2"))
+        pTable->ts.eState = 0
+
+    Case FTS5_ROLLBACK
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState = 0 OrElse pTable->ts.eState = 1 OrElse _
+            pTable->ts.eState = 2, _
+            StrPtr(!"p->ts.eState==0 || p->ts.eState==1 || p->ts.eState==2"))
+        pTable->ts.eState = 0
+
+    Case FTS5_SAVEPOINT
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState >= 1, StrPtr(!"p->ts.eState>=1"))
+        sqlite3DebugAssertCheck( _
+            savepointNumber >= 0, StrPtr(!"iSavepoint>=0"))
+        sqlite3DebugAssertCheck( _
+            savepointNumber >= pTable->ts.iSavepoint, _
+            StrPtr(!"iSavepoint>=p->ts.iSavepoint"))
+        pTable->ts.iSavepoint = savepointNumber
+
+    Case FTS5_RELEASE
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState >= 1, StrPtr(!"p->ts.eState>=1"))
+        sqlite3DebugAssertCheck( _
+            savepointNumber >= 0, StrPtr(!"iSavepoint>=0"))
+        sqlite3DebugAssertCheck( _
+            savepointNumber <= pTable->ts.iSavepoint, _
+            StrPtr(!"iSavepoint<=p->ts.iSavepoint"))
+        pTable->ts.iSavepoint = savepointNumber - 1
+
+    Case FTS5_ROLLBACKTO
+        sqlite3DebugAssertCheck( _
+            pTable->ts.eState >= 1, StrPtr(!"p->ts.eState>=1"))
+        sqlite3DebugAssertCheck( _
+            savepointNumber >= -1, StrPtr(!"iSavepoint>=-1"))
+        pTable->ts.iSavepoint = savepointNumber
+    End Select
+End Sub
+#endif
+
 Private Function fts5IsContentless CDecl Alias "fts5IsContentless" (ByVal arg0 As c2fb_Fts5FullTable Ptr, ByVal arg1 As c2fb_c_int) As c2fb_c_int
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_main.c
 ' c2fb source-line: 342
@@ -498,7 +578,9 @@ Private Function fts5InitVtab CDecl Alias "fts5InitVtab" (ByVal arg0 As c2fb_c_i
         local4 = c2fb_temp_17
     Else
         If arg0 Then
-            ' empty C statement
+#ifdef SQLITE_DEBUG
+            fts5CheckTransactionState(local4, FTS5_BEGIN, 0)
+#endif
         End If
     End If
     c2fb_temp_18 = CPtr(c2fb_sqlite3_vtab Ptr Ptr, @((*arg5)))
@@ -2673,7 +2755,9 @@ Private Function fts5SyncMethod CDecl Alias "fts5SyncMethod" (ByVal arg0 As c2fb
 
     ' C automatic storage declaration
     local1 = CPtr(c2fb_Fts5FullTable Ptr, arg0)
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(local1, FTS5_SYNC, 0)
+#endif
     c2fb_temp_0 = CPtr(ZString Ptr Ptr Ptr, @(CPtr(c2fb_Fts5Config Ptr, local1->p.pConfig)->pzErrmsg))
     c2fb_temp_1 = CPtr(ZString Ptr Ptr, @(local1->p.base.zErrMsg))
     (*c2fb_temp_0) = c2fb_temp_1
@@ -2691,7 +2775,9 @@ Private Function fts5BeginMethod CDecl Alias "fts5BeginMethod" (ByVal arg0 As c2
 
     local0 = fts5NewTransaction(CPtr(c2fb_Fts5FullTable Ptr, arg0))
     If (-Cast(c2fb_c_int, ((local0 = Cast(c2fb_c_int, &O0ULL))))) Then
-        ' empty C statement
+#ifdef SQLITE_DEBUG
+        fts5CheckTransactionState(CPtr(c2fb_Fts5FullTable Ptr, arg0), FTS5_BEGIN, 0)
+#endif
     End If
     Return local0
 End Function
@@ -2699,7 +2785,9 @@ Private Function fts5CommitMethod CDecl Alias "fts5CommitMethod" (ByVal arg0 As 
 ' c2fb source-path: /home/jkfirth/port_corpus/sqlite/ext/fts5/fts5_main.c
 ' c2fb source-line: 2143
     ' C unused-parameter annotation
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(CPtr(c2fb_Fts5FullTable Ptr, arg0), FTS5_COMMIT, 0)
+#endif
     Return Cast(c2fb_c_int, &O0ULL)
 End Function
 Private Function fts5RollbackMethod CDecl Alias "fts5RollbackMethod" (ByVal arg0 As c2fb_sqlite3_vtab Ptr) As c2fb_c_int
@@ -2713,7 +2801,9 @@ Private Function fts5RollbackMethod CDecl Alias "fts5RollbackMethod" (ByVal arg0
 
     ' C automatic storage declaration
     local1 = CPtr(c2fb_Fts5FullTable Ptr, arg0)
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(local1, FTS5_ROLLBACK, 0)
+#endif
     c2fb_temp_0 = Cast(c2fb_c_int, c2fb_external_sqlite3Fts5StorageRollback(CPtr(c2fb_Fts5Storage Ptr, local1->pStorage)))
     local0 = c2fb_temp_0
     c2fb_temp_1 = CPtr(Long Ptr, @(CPtr(c2fb_Fts5Config Ptr, local1->p.pConfig)->pgsz))
@@ -3915,7 +4005,9 @@ Private Function fts5SavepointMethod CDecl Alias "fts5SavepointMethod" (ByVal ar
 
     local0 = CPtr(c2fb_Fts5FullTable Ptr, arg0)
     local1 = Cast(c2fb_c_int, &O0ULL)
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(local0, FTS5_SAVEPOINT, arg1)
+#endif
     c2fb_temp_0 = Cast(c2fb_c_int, sqlite3Fts5FlushToDisk(CPtr(c2fb_Fts5Table Ptr, arg0)))
     local1 = c2fb_temp_0
     If (-Cast(c2fb_c_int, ((local1 = Cast(c2fb_c_int, &O0ULL))))) Then
@@ -3937,7 +4029,9 @@ Private Function fts5ReleaseMethod CDecl Alias "fts5ReleaseMethod" (ByVal arg0 A
 
     local0 = CPtr(c2fb_Fts5FullTable Ptr, arg0)
     local1 = Cast(c2fb_c_int, &O0ULL)
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(local0, FTS5_RELEASE, arg1)
+#endif
     If (-Cast(c2fb_c_int, (((Cast(c2fb_c_int, (arg1 + Cast(c2fb_c_int, 1ULL)))) < local0->iSavepoint)))) Then
         c2fb_temp_0 = Cast(c2fb_c_int, sqlite3Fts5FlushToDisk(CPtr(c2fb_Fts5Table Ptr, @(local0->p))))
         local1 = c2fb_temp_0
@@ -3961,7 +4055,9 @@ Private Function fts5RollbackToMethod CDecl Alias "fts5RollbackToMethod" (ByVal 
 
     local0 = CPtr(c2fb_Fts5FullTable Ptr, arg0)
     local1 = Cast(c2fb_c_int, &O0ULL)
-    ' empty C statement
+#ifdef SQLITE_DEBUG
+    fts5CheckTransactionState(local0, FTS5_ROLLBACKTO, arg1)
+#endif
     fts5TripCursors(local0)
     If (-Cast(c2fb_c_int, (((Cast(c2fb_c_int, (arg1 + Cast(c2fb_c_int, 1ULL)))) <= local0->iSavepoint)))) Then
         c2fb_temp_0 = CPtr(Long Ptr, @(CPtr(c2fb_Fts5Config Ptr, local0->p.pConfig)->pgsz))

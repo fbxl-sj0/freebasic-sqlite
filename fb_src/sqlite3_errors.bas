@@ -31,6 +31,7 @@
 #include once "sqlite3_constants.bi"
 #include once "sqlite3_parser_types.bi"
 #include once "sqlite3_vfs.bi"
+#include once "sqlite3_btree.bi"
 #include once "sqlite3_vdbe_mem_types.bi"
 #include once "sqlite3_vdbe_mem_text.bi"
 
@@ -170,6 +171,22 @@ Sub sqlite3SystemError CDecl Alias "sqlite3SystemError" ( _
     ByVal resultCode As SQLITE_C_INT _
 ) Export
     If db = 0 OrElse resultCode = SQLITE_IOERR_NOMEM Then Return
+#if defined(SQLITE_USE_SEH) AndAlso Not defined(SQLITE_OMIT_WAL)
+    If resultCode = SQLITE_IOERR_IN_PAGE Then
+        ' SEH stores the injected or mapped-page error in the WAL, not the VFS.
+        sqlite3BtreeEnterAll(db)
+        For databaseIndex As SQLITE_C_INT = 0 To db->nDb - 1
+            Dim pBtree As Btree Ptr = CPtr(Btree Ptr, db->aDb(databaseIndex).pBt)
+            If pBtree <> 0 Then
+                Dim pPager As Pager Ptr = sqlite3BtreePager(pBtree)
+                Dim systemError As SQLITE_C_INT = sqlite3PagerWalSystemErrno(pPager)
+                If systemError <> 0 Then db->iSysErrno = systemError
+            End If
+        Next
+        sqlite3BtreeLeaveAll(db)
+        Return
+    End If
+#endif
     Dim primaryCode As SQLITE_C_INT = resultCode And &HFF
     If primaryCode = SQLITE_CANTOPEN OrElse primaryCode = SQLITE_IOERR Then
         db->iSysErrno = sqlite3OsGetLastError(CPtr(sqlite3_vfs Ptr, db->pVfs))

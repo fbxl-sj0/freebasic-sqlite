@@ -44,6 +44,7 @@ ALLOWED_ABSENT_STATUSES = {
     "Loadable extension entry point",
     "Optional instrumentation",
 }
+PENDING_STATUSES = {"Needs debug port", "Needs port"}
 
 
 def find_procedure_names(root: Path) -> dict[str, list[str]]:
@@ -113,13 +114,13 @@ def main() -> int:
         if row.get("Port status") == "FB body present"
         and (row.get("Function") or "").lower() not in implementation_names
     ]
-    pending = [row for row in rows if row.get("Port status") == "Needs debug port"]
+    pending = [row for row in rows if row.get("Port status") in PENDING_STATUSES]
     invalid_status = [
         row
         for row in rows
         if row.get("Port status") not in {
             "FB body present",
-            "Needs debug port",
+            *PENDING_STATUSES,
             *ALLOWED_ABSENT_STATUSES,
         }
     ]

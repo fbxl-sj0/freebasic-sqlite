@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 /*
     Project: SQLite FreeBASIC port verification
     File: sqlite_random_diff.c
@@ -9,6 +8,7 @@
         - Compare result codes, row counts, and result bytes.
     This file intentionally does NOT contain: SQLite implementation code.
 */
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <link.h>
 #include <stdint.h>

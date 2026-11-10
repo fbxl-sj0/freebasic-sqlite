@@ -96,6 +96,12 @@ upstream test support, upstream-disabled code, standalone loadable-extension
 entry points, or optional FTS3 merge tracing.
 `make -C fb_src audit-extension-function-bodies` passes the active body rows
 and reports these classified exclusions.
+The four omitted FTS3, FTS5, and R-Tree entrypoint wrappers are the alternate
+registration path used when those modules are compiled outside `SQLITE_CORE`;
+this build links them into SQLite and calls their built-in initializers. The
+matched Linux full-suite databases also show `loadext.test` passing 54/54,
+`loadext2.test` 23/23, and `extension01.test` 9/9 for both engines, covering
+the core's general dynamic-extension loader.
 
 ## FTS3/4 port progress (2026-10-20)
 
@@ -10130,3 +10136,664 @@ At 2026-10-29 19:35 UTC, 198 jobs had completed, four were running, and no
 failures had been recorded. All 198 job states and error counts match the saved
 C baseline exactly. The latest database and logs are snapshotted under
 `build/full-suite-fb-tempfile-unlink-partial-20261029/`.
+
+### Full-suite result after the tempfile fix (2026-10-29 20:24 UTC)
+
+The corrected FreeBASIC test library completed all 1,516 jobs in 59 minutes 32
+seconds. It had 1,513 passing jobs and three failed jobs, with six errors. The
+saved C reference run has the same job states and error counts for all 1,516
+jobs: there are zero outcome mismatches. The failures are
+`fts5bigtok2.test`, `sqllimits1.test`, and `e_fts3.test`.
+
+The C fixture recorded 1,873,060 checks and the FreeBASIC fixture recorded
+1,980,932. Check counts differ in 135 jobs, mostly because allocation-fault
+tests repeat a build-dependent number of iterations; these totals are not a
+one-for-one coverage measure. The FreeBASIC database and logs are saved under
+`build/full-suite-fb-tempfile-unlink-final-20261029/`.
+
+### Win32 fixture smoke and numeric mask correction (2026-10-29 21:04 UTC)
+
+The i686 MinGW toolchain cross-builds Tcl 8.6.18, the FreeBASIC test DLL, and
+the unchanged C Tcl fixture. The fixture uses a test-only DLL import library
+that marks exported data symbols as data, and a temporary MinGW adaptation of
+`windirent.h`. The Windows fixture run excludes the optional ICU and zipfile C
+test-support modules, so this is a focused platform check rather than a full
+Windows suite.
+
+That run found that `SQLITE_FP_WORD_MASK` used an unsuffixed `&HFFFFFFFF`
+literal. On the 32-bit target it widened as an all-ones `ULongInt`, corrupting
+the fixed-point products used by `sqlite3AtoF`. The mask now has an explicit
+`ULL` suffix. A small `sqlite3AtoF` probe returns the expected values on both
+Win32 and Linux; the Windows C reference and FreeBASIC fixtures both pass
+`test/main.test` 95/95, `test/win32nolock.test` 17/17,
+`test/win32shm.test` 6/6, `test/win32heap.test` 1/1, `test/mem5.test` 5/5, and
+`test/wal5.test` 413/413.
+
+The memsys5 test dump now uses FreeBASIC's `crt/stdio.bi` bindings for
+`stdout` and `stderr`, which select the target CRT's stream representation.
+The Win32 test DLL builds and `test/mem5.test` passes. No compiler source
+changes were needed. A fresh Linux debug/test library also passes
+`test/main.test` 95/95 and `test/mem5.test` 5/5 after these source edits.
+
+The source and feature audits were rerun after the numeric fix: 3,263/3,263
+core bodies and 1,339/1,339 selected extension bodies are present, all 15
+classified extension exclusions remain accounted for, and the API table has
+278/279 assignments with only the intentional `global_recover` null slot.
+The 125-file core inventory has no unclassified source files. The remaining
+Windows verification is a selected Tcl set; the full Windows suite has not
+been run with the ICU and zipfile test-support extensions enabled.
+
+### Win32 MinGW C99 math and full Tcl comparison (2026-10-29 21:30 UTC)
+
+The Windows build rules now enable `SQLITE_HAVE_C99_MATH_FUNCS` when math
+functions are requested, matching SQLite's non-MSVC C build. Set
+`WINDOWS_C99_MATH=0` for a CRT that lacks those functions. The auto-enabled
+Win32 profile passes `func7.test` 74/74 and `func4.test` 220/220 under Wine.
+
+Matched Windows C and FreeBASIC Tcl runs are in progress under Wine, using the
+same MinGW/Tcl profile without ICU and zipfile test support. At this snapshot,
+C has 255 jobs resolved and FreeBASIC 65; the 65 common jobs have no
+pass/fail or error-count mismatches. C has two failures so far in
+`rtree1.test` and `win32lock.test`; FreeBASIC has none. The final Windows
+comparison is not complete yet.
+
+At 2026-10-29 21:36 UTC, C had 331 jobs resolved and FreeBASIC had 73. All 73
+common resolved jobs match on status and error count. FreeBASIC has since
+reported the same `win32lock.test` error; C's two `rtree1.test` errors have not
+yet been reached by the FreeBASIC run.
+
+At 2026-10-29 21:42 UTC, C had 397 jobs resolved and FreeBASIC had 85. All 85
+common resolved jobs still match. C has the two `rtree1.test` errors plus the
+shared `win32lock.test` error; FreeBASIC has only the shared `win32lock.test`
+error so far. Both full-run databases and logs are in their respective
+`build/full-suite-win32-fb/full-c/` and `full-fb-c99/` directories.
+
+At 2026-10-29 21:43 UTC, C had 409 jobs resolved and FreeBASIC had 90. All 90
+common resolved jobs match on pass/fail status and error count. Four common
+allocation-fault suites report different check counts between builds, but both
+builds report zero errors in those jobs; check totals are therefore not being
+used as a parity criterion. The suites are `fkey_malloc.test`, `gcfault.test`,
+`pragmafault.test`, and `schemafault.test`. The C `rtree1.test` errors and
+shared `win32lock.test` error remain the only failures recorded so far.
+
+The recorded Windows failures are platform observations. In the C reference,
+`rtree1-22.0` and `rtree1-22.1` expect `[123]` and `[123 1]` on i686 Windows,
+but get `[]` and `[123 0]`; the same cases pass on the 64-bit Linux full run.
+The unmodified upstream test excludes i686 Linux for this round-off case, but
+not i686 Windows. Both Windows fixtures also stop in `win32lock.test` at the
+same lock-probe command with Tcl's `busy` error after repeated successful reads;
+this is a shared Windows/Wine result, not a FreeBASIC-only failure.
+
+At 2026-10-29 21:47 UTC, C had 432 of the 1,514 configured Windows jobs
+resolved and FreeBASIC had 118. All 118 common jobs match on outcome and error
+count. The Windows job table does not schedule `test/crash.test` or
+`test/crash2.test`, which are present in the 1,516-job Linux table; both require
+the `crashtest` capability. Separately, the Windows fixture profile omits
+optional ICU and zipfile test support.
+
+At 2026-10-29 21:48 UTC, the C count remained 432 and FreeBASIC advanced to
+141. All 141 common resolved jobs still match on status and error count. The
+FreeBASIC run has not reached `rtree1.test` yet, so its two C-reference errors
+remain unclassified for that target.
+
+At 2026-10-29 21:51 UTC, C had 435 jobs resolved and FreeBASIC had 158. All
+158 common jobs match on pass/fail status and error count. `rtree1.test` is
+still pending in the FreeBASIC run.
+
+At 2026-10-29 21:53 UTC, C had 460 jobs resolved and FreeBASIC had 186. All
+186 common jobs match on status and error count; FreeBASIC has not yet reached
+`rtree1.test`.
+
+### Win32 WAL shared-memory lifetime fix (2026-10-29)
+
+The Win32 `walthread.test` exposed a real port race. `winOpenSharedMemory()`
+read `winShmNodeList` before taking the global shared-memory mutex. A concurrent
+close could remove and free that node before the open path linked its new
+connection, leaving a stale mapped-page pointer that later faulted in
+`walIndexTryHdr()`. The FreeBASIC code now reads the list head after acquiring
+the mutex, matching `src/os_win.c`.
+
+The unchanged upstream Win32 `walthread.test` passes 58/58 with zero errors and
+no memory leaks under Wine. With the fixture-matched 1 KiB page-size profile,
+`shared3.test` also passes 16/16. A separate 30-second four-thread C API probe
+completed 1,762 writes with zero errors. A fresh 1,514-job Windows suite
+comparison is running with the fix in
+`build/full-suite-win32-fb/full-fb-fixed-wal-shm-profile/`.
+
+At 2026-10-29 23:27 UTC, the C run had 1,185 of 1,514 jobs resolved and the
+fixed FreeBASIC run had 112. All 112 common jobs have matching outcomes after
+an isolated rerun confirmed `walsetlk_snapshot.test` passes; its parallel-run
+record contains a Tcl stdout write error. Both full runs have completed
+`walthread.test` 58/58. The only remaining shared failure is `win32lock.test`,
+which stops with the same Tcl `busy` error in both fixtures. Five passing
+fault-injection jobs have different check totals, but both fixtures report
+zero errors in them. The C run has seven failures in total so far, including
+the shared lock test; FreeBASIC's second recorded failure is the stdout issue
+above.
+
+### Win32 test-fixture configuration sync correction (2026-10-29 23:58 UTC)
+
+The first post-race FreeBASIC Windows fixture was linked without the
+test-only `SQLITE3_FB_TEST_CONFIG_SYNC` calls and the C `sqlite3Config` export.
+That made the unchanged `shared6.test` helper read a stale C configuration
+value after `sqlite3_enable_shared_cache(1)`. The FreeBASIC API state was set
+correctly; this was a test-fixture build mismatch. The no-sync run is preserved
+under `build/full-suite-win32-fb/full-fb-fixed-wal-shm-profile-nosync/` with
+175 resolved jobs, including the `shared6.test` false mismatch.
+
+The corrected test DLL includes the configuration-sync hook, C configuration
+data, the upstream FTS3 term test helper, Tcl imports, and the full symbol
+exports expected by the fixture. The unchanged `shared6.test` now passes
+33/33 with no errors or tracked leaks in an isolated run. A fresh full suite is
+running from `build/full-suite-win32-fb/full-fb-fixed-wal-shm-profile-sync/`.
+At 23:58 UTC it had two jobs complete with zero errors and four active workers.
+The matched C reference had 1,308 of 1,514 jobs resolved with seven platform
+failures recorded so far.
+
+At 2026-10-30 00:00 UTC, the corrected FreeBASIC run had 33 jobs complete,
+zero errors, and four active workers. All 33 common jobs match the C reference
+on pass/fail status and error count. `shared6.test` is still pending in this
+run; its isolated corrected-profile check passed 33/33.
+
+At 00:01 UTC, FreeBASIC had 56 jobs resolved. The only recorded failure was
+`ext/rbu/rbuvacuum2.test`, which returns early when RBU support is absent. Its
+isolated run exits with zero errors; this FreeBASIC profile does not include
+the optional RBU extension. All other 55 common resolved jobs match the C run.
+
+At 00:03 UTC, the corrected FreeBASIC run had 61 jobs resolved; the same RBU
+skip is the only recorded error. The other 60 common jobs match the C run.
+The C reference remains at 1,308 resolved jobs while its long-running workers
+continue.
+
+At 00:05 UTC, the corrected FreeBASIC run had 62 jobs resolved. The RBU skip
+remains its only recorded error; the other 61 common outcomes match C. The
+full `walthread.test` and `win32lock.test` jobs are active in the new fixture.
+
+At 00:06 UTC, the corrected run had 64 jobs resolved. `shared6.test` remained
+pending; the isolated corrected-profile check passed 33/33. The RBU skip was
+the only recorded FreeBASIC error at that snapshot.
+
+At 00:07 UTC, the corrected run had 75 jobs resolved. `walthread.test` passed
+58/58, `shared6.test` remained pending, and `win32lock.test` failed with the
+same Tcl `busy` error as C. The RBU skip remains the other recorded result.
+Of 75 common jobs, all match after accounting for the direct RBU skip rerun.
+The C reference had 1,340 jobs resolved with the same seven platform failures.
+
+At 00:09 UTC, FreeBASIC had 77 jobs resolved and C had 1,342. The full
+FreeBASIC `walthread.test` passed 58/58. `win32lock.test` is the same shared
+failure in both fixtures. `shared6.test` remains pending in the full run after
+its 33/33 isolated pass. All 77 common outcomes agree after accounting for
+the direct RBU skip rerun; four passing allocation-fault tests have different
+check totals but no errors in either fixture.
+
+At 00:21 UTC, C had 1,472 jobs resolved and the corrected FreeBASIC run had
+125. Of 130 common jobs, the only recorded outcome differences are the RBU
+skip logging issue and `rtree1.test`. FreeBASIC passes all 299 R-Tree checks,
+including `rtree1-22.0` and `rtree1-22.1`; the C reference fails those two
+32-bit Windows round-off cases with `[]` and `[123 0]` instead of the expected
+`[123]` and `[123 1]`. The expected results match FreeBASIC. `shared6.test`
+remains pending in the full run; its isolated corrected-profile run passes
+33/33.
+
+At 00:26 UTC, C had 1,512 jobs resolved and the corrected FreeBASIC run had
+157. All 157 common results match except the RBU skip log and the two
+`rtree1.test` reference failures described above. `shared6.test` passes 33/33
+and `walthread.test` passes 58/58 in the corrected full run; `ctime.test` is
+still pending.
+
+At 00:29 UTC, the corrected FreeBASIC run had 193 jobs resolved with the same
+two recorded results. The C run remains at 1,512 resolved jobs, with two long
+workers still active. Among 199 common resolved rows, the only differences
+remain the RBU skip record and the R-Tree cases where FreeBASIC matches the
+test expectations and C does not.
+
+At 00:33 UTC, the C run had 1,513 jobs resolved; `walcrash3.test` is still
+running its crash-recovery loop. FreeBASIC had 255 jobs resolved. Its full
+`shared6.test` and `walthread.test` both pass. The same RBU skip log and C-only
+R-Tree round-off errors remain the only differences across the 255 common
+jobs.
+
+At 00:41 UTC, C had 1,513 of 1,514 jobs resolved and the corrected FreeBASIC
+run had 277. The 277 common jobs have two recorded differences: FreeBASIC's
+parallel-runner stdout error on the RBU unsupported-feature skip, and the C-only
+R-Tree round-off errors described above. A direct RBU skip rerun returns zero
+errors. `win32lock.test` fails in both fixtures; `shared6.test` and
+`walthread.test` pass in the corrected FreeBASIC full run. The C `walcrash3`
+job is still doing crash-recovery I/O.
+
+At 00:43 UTC, the corrected FreeBASIC run had 301 resolved jobs. The same two
+recorded differences remain across all 301 common jobs: the RBU skip logging
+and the two C-only R-Tree round-off errors. `win32lock.test` continues to fail
+in both fixtures with the same Wine `busy` error.
+
+At 00:45 UTC, FreeBASIC had 332 jobs resolved; all common results still differ
+only in those two known cases. `shared6.test` remains 33/33 and `walthread.test`
+remains 58/58 in the corrected profile.
+
+At 00:46 UTC, FreeBASIC had 344 jobs resolved with no new outcome differences.
+The C run still had one active `walcrash3.test` job. The full-run `ctime.test`
+remains pending; the Win32 mutex compile-option correction has passed its
+standalone Win32 probe but is not yet in the running suite DLL.
+
+At 00:47 UTC, the corrected FreeBASIC run had 361 jobs resolved and the C run
+still had 1,513. The 361 common results retain only the RBU skip and C-only
+R-Tree differences. `shared6.test` and `walthread.test` pass in the corrected
+full run; `ctime.test` remains pending.
+
+At 00:50 UTC, the corrected FreeBASIC run had 394 jobs resolved with no new
+recorded failures. The C reference still had one active crash-recovery job.
+The full FreeBASIC run continues to pass `shared6.test` and `walthread.test`.
+
+At 00:53 UTC, the corrected FreeBASIC run remained at 396 resolved jobs with
+four active workers. A 20-second process sample confirmed that the R-Tree
+worker was still using CPU and writing data; the C `walcrash3.test` worker also
+continued writing tens of megabytes.
+
+### Win32 compile-option mutex report (2026-10-30)
+
+`sqlite3_compile_options.bas` previously reported `MUTEX_PTHREADS` for every
+thread-safe build. It now reports the active platform mutex: `MUTEX_W32` for a
+Win32 build, `MUTEX_PTHREADS` for Unix, and the no-mutex option for
+single-threaded builds. A standalone Win32 FreeBASIC probe compiled the updated
+module and returned `MUTEX_W32` without `MUTEX_PTHREADS`. The original
+full-suite DLL predated this metadata-only source change; the rebuilt DLL's
+focused `test/ctime.test` result is recorded below.
+
+At 00:58 UTC, the corrected FreeBASIC run had 429 jobs resolved, representing
+9,042/19,757 units (46%) of the runner's estimated work, with no new recorded
+failures. The C run had completed 19,756/19,757 estimated units; its final
+`walcrash3.test` job remains active. The FBC R-Tree worker is still computing.
+
+### Platform-specific Win32 PRAGMA metadata (2026-10-30)
+
+The Win32 `PRAGMA data_store_directory` dispatcher was present, but the
+generated PRAGMA-name index came only from Unix preprocessing. `pragmaLocate()`
+therefore could not resolve the Win32 name. `sqlite_codegen pragma-table` now
+accepts an optional Windows-preprocessed `pragma.i` and emits Unix and Windows
+tables behind `SQLITE_OS_WIN`. The `bulk-candidates-loose` recipe produces the
+Windows input with `PRAGMA_WIN_CC` (default `i686-w64-mingw32-gcc`). The
+generated tables retain 66 Unix names and contain 67 Windows names; both share
+the same 57 result-column names. The Unix table contents are unchanged.
+
+A rebuilt Win32 FreeBASIC test DLL passes the unchanged upstream
+`test/pragma.test` 242/242, including `pragma-20.3` and `pragma-20.5`, and
+`test/ctime.test` 87/87. The C reference reports 89/89 for `ctime.test` because
+its compile-option list includes two C-build entries (`ATOMIC_INTRINSICS=1`
+and `NEED_ERR_NAME`) that the FreeBASIC build does not report; each build's
+checks pass. The data-directory PRAGMA now sets and reads the directory used
+for relative database paths. Both focused FreeBASIC tests report zero errors
+and zero tracked memory leaks.
+
+The prior Windows C baseline resolved all 1,514 jobs: 1,507 passed and seven
+failed (1,746,673 individual checks, 1,007 reported errors). The prior corrected
+FreeBASIC run stopped after 564 jobs were resolved, so it was incomplete. A
+fresh full FreeBASIC run with the PRAGMA table fix started at 01:19 UTC. At
+01:22 UTC, 60 of 1,514 jobs were resolved and 1,450 remained ready, with four
+long-running workers. All 60 resolved jobs match the C baseline's status and
+error counts, with zero FreeBASIC errors. The full Windows comparison is still
+running.
+
+At 01:27 UTC, 105 jobs were resolved: 104 passed and `test/win32lock.test`
+failed with the same Wine `busy` result as the C reference. All 105 common jobs
+match status and error counts. Four workers remain active.
+
+At 01:33 UTC, 240 jobs were resolved. The shared `win32lock.test` failure and
+the C-only `rtree1.test` rounding failure are the only outcome differences;
+all other resolved jobs match C. The test runner estimated about 22 minutes
+remaining, with six workers active.
+
+At 01:34 UTC, 254 jobs were resolved: 253 common outcomes match C, and the
+single difference remains `rtree1.test`, which passes in FreeBASIC while the
+C/Wine reference reports two rounding errors. There are six active workers and
+1,254 jobs still ready.
+
+At 01:43 UTC, 366 jobs were resolved. The same two differences remain:
+`win32lock.test` fails in both engines, and FreeBASIC passes the C-failing
+`rtree1.test`. The other 364 outcomes match. This run's DLL predates the
+test-only `lock_status` metadata correction described below.
+
+### Test-only `lock_status` name-list correction (2026-10-30)
+
+A direct `PRAGMA pragma_list` comparison found 68 names in the Windows C test
+build and 67 in FreeBASIC. The `lock_status` dispatcher existed in FreeBASIC,
+but the test/debug name merger did not include its name. The merger now exposes
+the row under `SQLITE_TEST` or `SQLITE_DEBUG`, in sorted order, and the pragma
+virtual-table lookup resolves it under the same conditions. A four-check Tcl
+regression passes against both engines, verifying the 68-name count, the
+`lock_status` row, and its table-valued form. The unchanged upstream
+`pragma5.test` passes 8/8, `pragma2.test` passes 27/27, `jrnlmode2.test` passes
+14/14, and `pragma.test` passes 242/242 against the rebuilt FreeBASIC Win32
+DLL. The permanent local regression `tests/pragma_name_list.test.tcl` checks
+the list and virtual-table entries against both engines; it passes with zero
+errors and no tracked leaks. All focused runs pass without tracked leaks. The
+broad Windows run above started before this correction, so it does not verify
+the final DLL.
+
+At 01:45 UTC, that broad run had resolved 395 jobs. The shared
+`win32lock.test` failure and the C-only `rtree1.test` rounding errors remain
+the only observed differences; six workers are still active.
+
+The full Linux Tcl comparison remains complete: FreeBASIC and C each passed
+1,513 of 1,516 jobs and recorded the same three failing jobs and six errors.
+This is test-suite parity for that Linux profile, not a claim that every SQLite
+platform, extension, or compile-time option has been validated.
+
+### Current test status and Win32 SEH follow-up (2026-10-30)
+
+The completed matched Linux runs report 1,513 passing jobs out of 1,516 for
+both FreeBASIC and C (99.8% by job count). Both report the same six errors in
+`ext/fts5/test/fts5bigtok2.test`, `test/sqllimits1.test`, and `test/e_fts3.test`.
+This compares job outcomes and error counts; generated-test invocation totals
+differ between builds, so they are not an apples-to-apples assertion count.
+
+The Win32 FBC VDBE error and commit-failure paths now call `sqlite3SystemError`,
+matching the upstream C paths needed to transfer a Windows SEH/WAL error into
+`db->iSysErrno`. A rebuilt Win32 test DLL with the temporary tracing removed
+passes `test/walseh1.test` 325/325, `test/misc7.test` 1,294/1,294, and
+`test/pragma.test` 242/242. Each reports zero tracked leaks. Tcl must receive
+the Windows `TCL_LIBRARY` path so its encoding files are found; with that
+environment, each test fixture exits cleanly.
+
+The earlier broad Win32 run used an older DLL and was stopped with only its
+long `test/walcrash3.test` job unfinished. Its 1,357 passing and 10 failed
+jobs are stale; the `walseh1.test` and `misc7.test` failures are fixed above.
+That run also recorded two RBU failures because RBU is not enabled in this
+FreeBASIC profile. The C Win32 baseline completed 1,514 jobs with 1,507 passed
+and seven failed; FreeBASIC passes the C/Wine-failing R-Tree rounding cases.
+
+A fresh full Win32 run uses the rebuilt DLL and the same Tcl library environment
+as the matched fixture. At 03:34 UTC it had resolved 444/1,514 jobs: 441
+passed and three were marked failed, with 1,066 ready and four running. Of 444
+common resolved jobs, `test/symlink2.test` and `test/win32lock.test` fail in
+both engines. `ext/vec1/test/vec1func.test` reports zero Tcl test errors but
+hit a runner stdout write error; an isolated rerun passes 1/1 with no tracked
+leaks. FreeBASIC passes `ext/rtree/rtree1.test`, where the C/Wine baseline has
+two rounding errors. Other common resolved outcomes match.
+
+That no-RBU full run was superseded after it reached 790 passing and five
+failed jobs. Its failures included the missing RBU feature. The RBU-enabled run
+below is the current full Win32 comparison.
+
+The 100% core source-audit figure means all 3,263 indexed core function
+definitions have FreeBASIC bodies. It does not mean every line has been
+translated statement-for-statement or that every platform and feature profile
+has been exhaustively tested. The selected extension audit finds 1,339 active
+bodies among 1,354 definitions; the other 15 are documented scope exclusions.
+
+On 2026-10-30, `make audit-function-bodies` passed, including a linked audit
+library compiled with `SQLITE_DEBUG`, `SQLITE_TEST`, and
+`SQLITE3_FB_COMPILE_DISABLED_BODIES`. The source inventory classified all 125
+top-level C files: 79 indexed implementation units, one data-only unit, and 45
+C test-support units intentionally left upstream, with zero unclassified
+files. The extension API table check found 278 assignments among 279 slots;
+slot 63 is intentionally null and there are no unexpected gaps.
+
+### RBU extension worklist (2026-10-30)
+
+The upstream RBU implementation was not included in the selected-extension
+inventory or the FreeBASIC build. `PORTING_RBU_FUNCTIONS.csv` now indexes all
+124 C function definitions. A source-unit C2FB pass with unresolved calls
+retained produced 117 procedure bodies and a private type context. These bodies
+are staged in `sqlite3_rbu.bas` with their layouts in `sqlite3_rbu_types.bi`;
+four manually ported procedures cover the shared-memory accessors,
+`sqlite3rbu_step`, and the RBU VFS constructor. The module compiles in isolation
+for Win32 and Linux, and `make audit-rbu-function-bodies` confirms all 121
+active bodies. The other three definitions are classified as debug-only,
+disabled-by-default checksum, or WinCE-only. The Makefile includes the module
+when `SQLITE_ENABLE_RBU` is enabled, and a release Linux library built with the
+normal version script exports the RBU API entry points. All 44 jobs in the
+upstream RBU test subset originally appeared to pass on both Win32 and Linux,
+but those C test harnesses were built without `SQLITE_ENABLE_RBU`; the RBU
+tests were therefore skipped. Those results are not RBU behavior coverage.
+RBU-enabled `test/ctime.test` passes 88/88 on Win32 and 93/93 on Linux, with no
+errors or tracked leaks.
+
+The first correctly feature-enabled Linux RBU subset completed 43/44 jobs; its
+only failure was `rbuB.test` case `rbuB-1.3`, where SQLite reported
+`SQLITE_NOTICE_RECOVER_WAL` but omitted the expected `SQLITE_NOTICE_RBU`. The
+feature-enabled C reference passes `rbuB.test` 5/5. A debugger trace showed that
+the FreeBASIC RBU VFS returned the expected extended result code, while the
+hand-maintained VDBE error path omitted `sqlite3VdbeLogAbort()`. The VDBE error
+helper now calls that preserved C2FB routine with the current opcode context.
+On a matched FreeBASIC test build, focused `rbuB.test` passes 5/5 and
+`rbuexlock.test` passes 64/64, both with no tracked leaks.
+
+The feature-enabled C reference completed all 44 RBU jobs: 178,702 tests,
+zero errors. Several interim FreeBASIC runs used mismatched test profiles: one
+lacked `SQLITE_NO_SYNC`; another used a 4096-byte default page and omitted
+unlock-notify and related flags. Those runs are not parity evidence. The current
+FreeBASIC library matches the reference's 64 compile options. Its focused RBU
+tests pass; 42 jobs in the matched RBU subset completed without errors before
+the remaining long fault tests were handed off to the full-suite run. The
+earlier broad Linux and Win32 runs used harnesses without the RBU test-support
+define, so those RBU jobs were skips.
+
+The first RBU-enabled Linux comparison used testfixtures compiled without
+`TCL_THREADS`. It reached 1,515 resolved jobs on both sides. C had its three
+baseline failures; FreeBASIC had those three plus a `test/thread004.test`
+segmentation fault. That comparison is superseded because Tcl's test-support
+mutex wrappers had compiled to no-ops despite the threaded Tcl runtime.
+
+`main.mk` now passes Tcl's `TCL_THREADS` setting to the testfixture compile.
+Corrected C and FreeBASIC fixtures each pass 64 concurrent focused
+`thread004.test` runs. The corrected matched RBU-enabled Linux full-suite runs
+have now both completed: each resolved all 1,516 jobs, with 1,513 passes and
+the same three failures and six errors (`fts5bigtok2.test`, `sqllimits1.test`,
+and `e_fts3.test`). A job-by-job comparison finds zero status or error-count
+mismatches, and `thread004.test` passes 3/3 in both. The C fixture recorded
+1,989,538 Tcl tests and FreeBASIC 2,221,917; generated fault-test iteration
+counts vary with build options, so these assertion totals are not one-to-one.
+The failing iteration labels inside `e_fts3.test` also vary between the two
+builds; parity is established at the full-suite job status and error-count
+level, not by identical fault-injection iteration numbers.
+
+The matched Win32 RBU test subsets have completed under Wine. Both fixtures
+completed all 44 jobs: 43 passed and `rbuB.test` reported the same Wine-only
+extra `SQLITE_IOERR_UNLOCK` results around the expected recovery notices. All
+44 job statuses and error counts match; the C fixture recorded 174,029 Tcl
+tests and FreeBASIC 237,044 because fault-injection test iteration counts vary
+by build.
+
+### `thread004.test` crash investigation (2026-10-30)
+
+The original FBC full-suite fixture's `test/thread004.test` job segfaulted after
+its first case passed. ASan traced the crash to a null `sqlite3*` passed to
+`sqlite3_table_column_metadata`; the test C helper gets that handle through a
+Tcl pointer-string table. The fixture had been compiled without Tcl's
+`TCL_THREADS` define even though the linked Tcl runtime is threaded. In that
+configuration, `Tcl_MutexLock` in the C test support compiles to a no-op, so
+the global pointer table is unsynchronized. `main.mk` now passes Tcl's
+`TCL_THREADS` setting when building `testfixture`. With the corrected define,
+the FBC fixture and the C reference fixture each pass 64 concurrent focused
+`thread004.test` runs. In the corrected full-suite rerun, C's `thread004.test`
+passes and FreeBASIC's now also passes with zero errors. No compiler change was
+made; the crash was in the C test harness's threading setup, not a reduced
+FreeBASIC compiler case.
+
+The completed matched Linux full-suite comparison remains the broad parity
+baseline: both C and FreeBASIC completed 1,516 jobs, with 1,513 clean jobs and
+the same six errors in `fts5bigtok2.test` (one), `e_fts3.test` (four), and
+`sqllimits1.test` (one). This is 99.8% by test-job count. The FreeBASIC run
+executed 1,980,820 Tcl tests and the C run 1,981,727; the assertion totals are
+close but vary slightly with build configuration. This comparison predates
+the RBU module.
+
+A corrected Win32 FreeBASIC fixture was built with `TCL_THREADS=1` and
+verified to import `Tcl_MutexLock` and `Tcl_MutexUnlock`. Its focused
+`thread004.test` run passed 3/3 under Wine. A corrected C reference fixture was
+built with Windows target macros and without the host-generated Unix feature
+header; its focused `thread004.test` run also passed 3/3. Both fixtures omit the
+Unix-only `fileio.c` and zlib-dependent `zipfile.c` support sources.
+The reported `sqlite_win32_wal_api_smoke.exe` was rerun twice against the
+current API-complete Win32 DLL from a clean directory; both Wine runs exited
+successfully. The execute fault remains isolated to the older DLL built before
+the `winShmMap` C calling-convention fix.
+
+An intermediate FreeBASIC Win32 fixture produced 11 failures in `rbu12.test`
+while the C reference passed. The cause was fixture global state: its linked
+`sqlite_pending_byte` came from a duplicate C `sqlite3PendingByte` at 1 GiB,
+while the FreeBASIC DLL uses 64 KiB on Win32. `lock_common.tcl` passed the
+incorrect value to child testfixture processes, so they used a different file
+lock offset. The fixture builder now uses the DLL's exported `sqlite3Config`
+and `sqlite3PendingByte` for `.dll.a` builds instead of linking `src/global.c`
+and the config mirror. A direct probe reports 65,536 before and after the test
+control call, and corrected `rbu12.test` passes 91/91 with no tracked leaks.
+The corrected C Win32 RBU subset completed 43/44 jobs and 173,988 Tcl tests;
+only `rbuB.test` has the shared Wine-specific error. The corrected FreeBASIC
+`rbu12.test` passes 91/91. The corrected FreeBASIC 44-job rerun completed
+43/44 jobs and 237,005 Tcl tests, with the same single `rbuB.test` error as C.
+A serial `testrunner.tcl retest` cleared the earlier `rbupass.test` stdout-pipe
+report; that test passed 1/1 on retry. A C/FreeBASIC join over all 44 jobs
+found zero status or error-count mismatches. C recorded 173,988 Tcl tests and
+FreeBASIC 237,005 because fault-injection iteration counts vary by build.
+A focused Win32 locking/WAL run of `win32lock.test`, `walthread.test`, and
+`wal.test` completed against C and FreeBASIC fixtures in separate directories.
+That run also selected `e_wal.test`; both builds pass it 37/37, `wal.test`
+581/581, and `walthread.test` 58/58. Both report the same `busy` error in
+`win32lock.test` after `win32lock-1.2-3025-ok`, with no status or error-count
+mismatch between engines.
+
+A broader `win32%` run also completed in both profiles. `win32heap`,
+`win32nolock`, and `win32shm` pass in C and FreeBASIC. Both report the same
+Wine `busy` result in `win32lock.test` and the same `win32longpath.test`
+expectation mismatch (`unable to open database file` expected, success got),
+followed by Wine failing to clean up the very long path. Job status and error
+counts match for all five scripts.
+An additional Windows core I/O and transaction subset (`pager1`, `pager2`,
+`wal2`, `wal3`, `lock3`, `lock4`, `shared`, `oserror`, and `filectrl`) passes
+all 3,878 tests in both C and FreeBASIC with zero errors.
+An 18-job Windows SQL/transaction subset selected `attach`, `backup`, `trans`,
+`insert`, `update`, `delete`, and `select1` tests (including matching FTS5
+update/delete tests); both fixtures pass all 2,986 tests with zero errors and
+identical per-job statuses and error counts.
+A Windows `devtest` attempt under Wine stopped before test execution because
+its four `Makefile.msc` build jobs require `nmake`, which is unavailable in
+this MinGW/Wine setup; the remaining 2,562 jobs were skipped.
+
+Two of the three shared Linux full-suite failures come from the ICU-enabled
+test profile. `sqllimits1-15.2` expects the built-in LIKE pattern limit, while
+ICU overrides `like()` and bypasses that limit as the test's own comment
+describes. In `e_fts3.test`, ICU-specific setup creates the `names` FTS3 table;
+the later `1.1.7.6` check still expects `sqlite_master` to be empty. Both C and
+FreeBASIC report the same resulting table. The remaining shared failure,
+`fts5bigtok2-1.1`, passes a 1.08-billion-byte Tcl string to an engine whose
+`SQLITE_MAX_LENGTH` is 1 billion. The Tcl binding code calls
+`sqlite3_bind_text64()` but discards its return code, so an oversized bind can
+be rejected while the Tcl wrapper continues with an unset parameter. Both
+engines then report success for the insert. This points to the shared C Tcl
+binding and test harness, not a FreeBASIC engine mismatch.
+
+### Win32 R-Tree comparison and current suite status (2026-10-30)
+
+The 32-bit MinGW C fixture reported two errors in `ext/rtree/rtree1.test`
+cases 22.0 and 22.1 while the FreeBASIC fixture passed all 299 cases. A small
+standalone harness built from the same SQLite amalgamation reproduces the C
+result with default `i686-w64-mingw32-gcc` floating-point settings: the
+large-integer comparison returns false. Rebuilding that C harness with
+`-msse2 -mfpmath=sse` makes the comparison return true, as expected. These
+cases exercise the 32-bit x87 rounding issue also reflected in the upstream
+test's existing skip for i686 Linux. This is a MinGW reference-build mode
+difference, not evidence of an R-Tree port mismatch.
+
+The matched Linux full-suite result remains 1,513 passing jobs out of 1,516
+for each engine, with the same three failed jobs and six errors. The C fixture
+recorded 1,989,538 Tcl test invocations and FreeBASIC 2,221,917; fault-injection
+iteration counts vary by build, so job outcomes are the comparable measure.
+The extra 71-job Win32 R-Tree/session comparison is still running under Wine;
+at this checkpoint, the C fixture has resolved 62 jobs and FreeBASIC 45, with
+four jobs active in each. Both show the same Wine cleanup failure in
+`ext/session/sessionconflict2.test`; the C-only `rtree1.test` result is
+explained above.
+
+The Win32 C comparison has now recorded all 71 jobs: 69 passed and two
+failed (`sessionconflict2.test` and the MinGW x87 `rtree1.test` cases), with
+three reported errors across 163,463 Tcl test invocations. Its four-worker
+testrunner process returned 139 after printing the final summary. A direct
+fixture exit smoke and a one-job testrunner reproduction both exited normally;
+the latter reproduced the two expected R-Tree assertions. The multi-job exit
+remains unclassified and is tracked separately from test-job outcomes.
+Another C run using four workers but only those two test jobs completed with
+the expected three test errors and a normal exit status of 1. The 139 result
+therefore did not reproduce from worker count alone; it remains specific to
+the long 71-job run or its accumulated workload.
+At the same checkpoint, the FreeBASIC run had 69 passed jobs, the same single
+Wine cleanup failure, and `rtree4.test` still running (59,220 Tcl invocations
+recorded so far). Its final job and process results are not yet available.
+At 11:26 UTC, that worker was still running after about 24 minutes at roughly
+90% CPU, and its test database had been modified seconds earlier. The long
+fault-injection job is making progress under Wine; its final count remains
+pending.
+Timing caveat: the FreeBASIC Makefile's target command passes no `-O` option,
+and `fbc -help` reports optimization level 0 as the compiler default. The C
+reference fixture command uses GCC `-O2`. Unless the FreeBASIC DLL was built
+with an unrecorded compiler override, this Windows stress-test runtime is not
+an apples-to-apples performance comparison. The current run remains useful as
+a correctness check; an optimized timing comparison would require a separate
+`FBC='fbc -O 2 ...'` build and rerun.
+
+### Compile-option parity correction (2026-10-30)
+
+A direct `PRAGMA compile_options` comparison found that both the Linux full
+suite and the Win32 subset use different SQLite feature profiles. FreeBASIC
+enables `DEBUG`, `ENABLE_WHERETRACE`, and `ENABLE_EXPLAIN_COMMENTS`; the C
+reference fixtures do not. The earlier 1,513/1,516 Linux figure remains the
+observed pass rate for each run, and their job statuses/error counts match,
+but it is not a feature-matched comparison. A separate C debug fixture now
+enables `SQLITE_DEBUG`, `SQLITE_ENABLE_WHERETRACE`,
+`SQLITE_ENABLE_EXPLAIN_COMMENTS`, `SQLITE_ENABLE_RBU`, and
+`SQLITE_ENABLE_UNLOCK_NOTIFY`. Its SQLite feature options match FreeBASIC's;
+compiler-specific options such as `COMPILER`,
+`ATOMIC_INTRINSICS`, `HAVE_ISNAN`, and `NEED_ERR_NAME` remain platform/build
+differences to account for separately. The full 1,516-job C debug run has
+completed, and its job outcomes match the FreeBASIC debug run.
+
+### Completed Win32 R-Tree and Session comparison (2026-10-30)
+
+The 71-job C Win32 run recorded 69 passes and two failures, with three errors
+across 163,463 test invocations. The FreeBASIC run recorded 70 passes and one
+failure, with one error across 171,691 invocations. Both fail only
+`ext/session/sessionconflict2.test` on Wine cleanup; C also fails
+`rtree1-22.0` and `rtree1-22.1` with its default 32-bit x87 math. FreeBASIC
+passes all 299 `rtree1.test` cases, and a C harness passes the two disputed
+comparisons when compiled with SSE math. Both engines pass all 112,471
+`rtree4.test` cases. The C four-worker runner returned 139 after its summary;
+the FreeBASIC runner returned the ordinary test-failure status. Their build
+options differ, so these are platform/profile results rather than a matched
+performance comparison.
+
+### Matched Win32 debug/SSE comparison (2026-10-30)
+
+A C Win32 fixture was rebuilt with `SQLITE_DEBUG`, WHERE tracing, explain
+comments, RBU, unlock-notify, and SSE floating-point math to match the
+FreeBASIC debug feature profile. It completed the same 71 jobs: both engines
+passed 70 jobs and reported one error in `ext/session/sessionconflict2.test`
+from Wine cleanup. The job-name/status/error-count join found zero mismatches.
+Both pass `rtree1.test` 299/299 and `rtree4.test` 112,471/112,471. The first
+matched C run's job database completed, but its process exit code was not
+captured after the session handle disappeared. A second run with `WINEDEBUG`
+SEH tracing completed with the normal test-failure exit code 1, and the trace
+contains no unhandled exception or page-fault message. The earlier 139 exit
+from the C run with default x87 math remains unexplained, but did not reproduce
+in the matched debug/SSE profile.
+Invocation totals were 166,700 for C and 171,691 for FreeBASIC; fault-injection
+counts differ, and timings are not comparable because the C fixture uses GCC
+`-O2` while the FreeBASIC Makefile leaves optimization at FBC's default 0.
+
+### Matched Linux debug full-suite comparison (2026-10-30)
+
+The C debug fixture and FreeBASIC debug fixture completed the same 1,516-job
+set. Each passed 1,513 jobs and reported six errors in the same three jobs:
+`ext/fts5/test/fts5bigtok2.test` (one), `test/e_fts3.test` (four), and
+`test/sqllimits1.test` (one). A job-name, status, and error-count join found
+zero mismatches. C recorded 2,056,369 Tcl test invocations and FreeBASIC
+2,221,917; fault-injection iteration totals differ, but per-job outcomes and
+error counts match. The C debug `misc7.test` rerun used `ulimit -n 1024`,
+matching the established FreeBASIC full-suite environment and avoiding the
+host's 524,288-file default.
+
+A maintained-source style audit now checks 737 `.bas`, `.bi`, `.c`, `.h`,
+`.py`, and `.sh` files outside generated, candidate, and vendored directories;
+all have file headers and footers. The audit also moved `_GNU_SOURCE` below
+the headers in three C verification helpers while keeping it before system
+includes, and moved the `sqlite3_bulk_arrayallocate.bas` footer after its
+preserved upstream blessing comment.

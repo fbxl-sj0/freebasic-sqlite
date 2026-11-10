@@ -2038,7 +2038,7 @@ Private Function ParsePragmaNameField(ByVal inputText As String, ByRef pragmaNam
     Return -1
 End Function
 
-Private Sub GeneratePragmaTable( _
+Private Sub GeneratePragmaTableSingle( _
     ByVal inputPath As String, ByVal headerPath As String, ByVal sourcePath As String _
 )
     Dim inputFile As Integer = FreeFile
@@ -2253,12 +2253,171 @@ Private Sub GeneratePragmaTable( _
         Trim(Str(columnCount)) & " result-column names to " & sourcePath
 End Sub
 
+Private Function ReadPragmaGeneratorFile(ByVal inputPath As String) As String
+    Dim inputFile As Integer = FreeFile
+    If Open(inputPath For Input As #inputFile) <> 0 Then _
+        ReportError("cannot read generated PRAGMA table: " & inputPath)
+    Dim contents As String = ""
+    Dim lineText As String
+    While Not EOF(inputFile)
+        Line Input #inputFile, lineText
+        contents &= lineText & Chr(10)
+    Wend
+    Close #inputFile
+    Return contents
+End Function
+
+Private Function ReadPragmaGeneratorCount( _
+    ByRef generatedHeader As String, ByVal countName As String _
+) As Integer
+    Dim marker As String = "#define " & countName & " "
+    Dim markerPosition As Integer = InStr(generatedHeader, marker)
+    If markerPosition = 0 Then ReportError("generated PRAGMA header is missing " & countName)
+    Dim countText As String = Mid(generatedHeader, markerPosition + Len(marker))
+    Dim lineEnd As Integer = InStr(countText, Chr(10))
+    If lineEnd > 0 Then countText = Left(countText, lineEnd - 1)
+    Dim countValue As Integer = ValInt(Trim(countText))
+    If countValue < 1 OrElse countValue > 255 Then _
+        ReportError("generated PRAGMA count is outside the supported range: " & countName)
+    Return countValue
+End Function
+
+Private Function ReadPragmaGeneratorColumnBlock(ByRef generatedSource As String) As String
+    Dim startMarker As String = "Private Dim Shared As Const ZString * "
+    Dim columnMarker As String = "sqlite3PragmaColumnNameText("
+    Dim startPosition As Integer = InStr(generatedSource, columnMarker)
+    If startPosition = 0 Then ReportError("generated PRAGMA source is missing its column-name table")
+    While startPosition > 1 AndAlso Asc(generatedSource, startPosition) <> Asc(Chr(10))
+        startPosition -= 1
+    Wend
+    If startPosition > 0 Then startPosition += 1
+    Dim endPosition As Integer = InStr(startPosition, generatedSource, _
+        "Function sqlite3PragmaNameTable")
+    If endPosition = 0 Then ReportError("generated PRAGMA source is missing its table accessor")
+    Return Mid(generatedSource, startPosition, endPosition - startPosition)
+End Function
+
+Private Sub WritePragmaGeneratorBody(ByVal outputFile As Integer, ByVal inputPath As String)
+    Dim inputFile As Integer = FreeFile
+    If Open(inputPath For Input As #inputFile) <> 0 Then _
+        ReportError("cannot read generated PRAGMA source: " & inputPath)
+    Dim bodyStarted As Integer = 0
+    Dim lineText As String
+    While Not EOF(inputFile)
+        Line Input #inputFile, lineText
+        If bodyStarted = 0 Then
+            If Left(Trim(lineText), Len("Private Dim Shared")) = _
+               "Private Dim Shared" Then bodyStarted = -1
+        End If
+        If bodyStarted <> 0 Then
+            If Left(lineText, Len("/' end of ")) = "/' end of " Then Exit While
+            Print #outputFile, lineText
+        End If
+    Wend
+    Close #inputFile
+    If bodyStarted = 0 Then ReportError("generated PRAGMA source has no table declarations")
+End Sub
+
+Private Sub GeneratePragmaTable( _
+    ByVal inputPath As String, ByVal headerPath As String, ByVal sourcePath As String, _
+    ByVal windowsInputPath As String _
+)
+    If Len(windowsInputPath) = 0 Then
+        GeneratePragmaTableSingle(inputPath, headerPath, sourcePath)
+        Exit Sub
+    End If
+
+    Dim unixHeaderPath As String = headerPath & ".unix.tmp"
+    Dim unixSourcePath As String = sourcePath & ".unix.tmp"
+    Dim windowsHeaderPath As String = headerPath & ".windows.tmp"
+    Dim windowsSourcePath As String = sourcePath & ".windows.tmp"
+    GeneratePragmaTableSingle(inputPath, unixHeaderPath, unixSourcePath)
+    GeneratePragmaTableSingle(windowsInputPath, windowsHeaderPath, windowsSourcePath)
+
+    Dim unixHeader As String = ReadPragmaGeneratorFile(unixHeaderPath)
+    Dim windowsHeader As String = ReadPragmaGeneratorFile(windowsHeaderPath)
+    Dim unixSource As String = ReadPragmaGeneratorFile(unixSourcePath)
+    Dim windowsSource As String = ReadPragmaGeneratorFile(windowsSourcePath)
+    Dim unixNameCount As Integer = ReadPragmaGeneratorCount(unixHeader, "SQLITE3_PRAGMA_NAME_COUNT")
+    Dim windowsNameCount As Integer = ReadPragmaGeneratorCount(windowsHeader, "SQLITE3_PRAGMA_NAME_COUNT")
+    Dim unixColumnCount As Integer = ReadPragmaGeneratorCount(unixHeader, "SQLITE3_PRAGMA_COLUMN_NAME_COUNT")
+    Dim windowsColumnCount As Integer = ReadPragmaGeneratorCount(windowsHeader, "SQLITE3_PRAGMA_COLUMN_NAME_COUNT")
+    If unixColumnCount <> windowsColumnCount Then _
+        ReportError("Unix and Windows PRAGMA metadata use different result-column counts")
+    If ReadPragmaGeneratorColumnBlock(unixSource) <> _
+       ReadPragmaGeneratorColumnBlock(windowsSource) Then _
+        ReportError("Unix and Windows PRAGMA metadata use different result-column tables")
+
+    Dim headerFile As Integer = FreeFile
+    Open headerPath For Output As #headerFile
+    Print #headerFile, "/'"
+    Print #headerFile, "    Project: SQLite FreeBASIC port"
+    Print #headerFile, ""
+    Print #headerFile, "    File: " & FileNameOnly(headerPath)
+    Print #headerFile, ""
+    Print #headerFile, "    Purpose: Declare the generated, platform-specific PRAGMA-name tables."
+    Print #headerFile, ""
+    Print #headerFile, "    Generated by fb_tools/sqlite_codegen/sqlite_codegen.bas."
+    Print #headerFile, "    Do not edit this file by hand."
+    Print #headerFile, "'/"
+    Print #headerFile, ""
+    Print #headerFile, "#ifndef SQLITE3_FB_PRAGMA_DATA_BI"
+    Print #headerFile, "#define SQLITE3_FB_PRAGMA_DATA_BI"
+    Print #headerFile, "#ifdef SQLITE_OS_WIN"
+    Print #headerFile, "#define SQLITE3_PRAGMA_NAME_COUNT " & Trim(Str(windowsNameCount))
+    Print #headerFile, "#else"
+    Print #headerFile, "#define SQLITE3_PRAGMA_NAME_COUNT " & Trim(Str(unixNameCount))
+    Print #headerFile, "#endif"
+    Print #headerFile, "#define SQLITE3_PRAGMA_COLUMN_NAME_COUNT " & Trim(Str(unixColumnCount))
+    Print #headerFile, "Declare Function sqlite3PragmaNameTable CDecl Alias ""sqlite3PragmaNameTable"" () As Const SqlitePragmaName Ptr"
+    Print #headerFile, "Declare Function sqlite3PragmaColumnNameTable CDecl Alias ""sqlite3PragmaColumnNameTable"" () As Const ZString Ptr Ptr"
+    Print #headerFile, "#endif"
+    Print #headerFile, ""
+    Print #headerFile, "/' end of " & FileNameOnly(headerPath) & " '/"
+    Close #headerFile
+
+    Dim outputFile As Integer = FreeFile
+    Open sourcePath For Output As #outputFile
+    Print #outputFile, "/'"
+    Print #outputFile, "    Project: SQLite FreeBASIC port"
+    Print #outputFile, ""
+    Print #outputFile, "    File: " & FileNameOnly(sourcePath)
+    Print #outputFile, ""
+    Print #outputFile, "    Purpose: Store platform-specific C-ordered PRAGMA-name and metadata tables."
+    Print #outputFile, ""
+    Print #outputFile, "    Generated by fb_tools/sqlite_codegen/sqlite_codegen.bas."
+    Print #outputFile, "    Do not edit this file by hand."
+    Print #outputFile, "'/"
+    Print #outputFile, ""
+    Print #outputFile, "#lang ""fb"""
+    Print #outputFile, "#include once ""sqlite3_types.bi"""
+    Print #outputFile, "#include once ""sqlite3_constants.bi"""
+    Print #outputFile, "#include once ""sqlite3_db_types.bi"""
+    Print #outputFile, "#include once ""sqlite3_pragma_types.bi"""
+    Print #outputFile, ""
+    Print #outputFile, "#ifdef SQLITE_OS_WIN"
+    WritePragmaGeneratorBody(outputFile, windowsSourcePath)
+    Print #outputFile, "#else"
+    WritePragmaGeneratorBody(outputFile, unixSourcePath)
+    Print #outputFile, "#endif"
+    Print #outputFile, ""
+    Print #outputFile, "/' end of " & FileNameOnly(sourcePath) & " '/"
+    Close #outputFile
+
+    Kill unixHeaderPath
+    Kill unixSourcePath
+    Kill windowsHeaderPath
+    Kill windowsSourcePath
+    Print "wrote " & Trim(Str(unixNameCount)) & " Unix and " & _
+        Trim(Str(windowsNameCount)) & " Windows PRAGMA metadata entries to " & sourcePath
+End Sub
+
 Private Sub PrintUsage()
     Print "Usage: sqlite_codegen tokens <parse.h> <output.bi>"
     Print "       sqlite_codegen keywords <keywordhash.h> <output.bi>"
     Print "       sqlite_codegen classes <tokenize.c> <output.bi>"
     Print "       sqlite_codegen global-data <global.c> <output.bi>"
-    Print "       sqlite_codegen pragma-table <pragma.i> <output.bi> <output.bas>"
+    Print "       sqlite_codegen pragma-table <pragma.i> <output.bi> <output.bas> [windows-pragma.i]"
     Print "       sqlite_codegen opcodes <opcodes.h> <output.bi>"
     Print "       sqlite_codegen opcode-names <opcodes.h> <output.bas>"
     Print "       sqlite_codegen parser-tables <parse.c> <output.bi>"
@@ -2294,7 +2453,7 @@ Case "parser-rule-ids"
     GenerateParserRuleIds(Command(2), Command(3), Command(4), Command(5))
 Case "pragma-table"
     If Len(Command(2)) = 0 OrElse Len(Command(3)) = 0 OrElse Len(Command(4)) = 0 Then PrintUsage()
-    GeneratePragmaTable(Command(2), Command(3), Command(4))
+    GeneratePragmaTable(Command(2), Command(3), Command(4), Command(5))
 Case Else
     PrintUsage()
 End Select

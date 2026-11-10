@@ -26,6 +26,9 @@ WIN_SEH_WINE ?= wine
 WIN_SEH_SMOKE_DIR ?= build/wal-seh-bridge-smoke
 RTREE_LAYOUT_WIN32_CC ?= i686-w64-mingw32-gcc
 RTREE_LAYOUT_WIN32_DIR ?= build/rtree-matcharg-layout-win32
+# The generated PRAGMA index includes names conditional on SQLITE_OS_WIN.
+PRAGMA_WIN_CC ?= i686-w64-mingw32-gcc
+PRAGMA_WIN_CANDIDATE_DIR ?= build/pragma-win-candidates
 WALKER_LAYOUT_WIN32_DIR ?= build/walker-layout-win32
 PYTHON ?= python3
 LLVM_NM ?= llvm-nm
@@ -33,6 +36,7 @@ PKG_CONFIG ?= pkg-config
 THREADSAFE ?= 1
 FB_OS ?= unix
 FB_TARGET ?= win64
+WINDOWS_C99_MATH ?= 1
 FEATURE_DEFINES ?=
 BODY_TYPE_MAPS ?=
 BODY_OPTIONS ?=
@@ -100,6 +104,15 @@ ifeq ($(FB_OS),windows)
 # Keep Win32 inline assembly in the syntax supported by the current gas backend.
 FB_TARGET_FLAGS ?= -target $(FB_TARGET) -asm intel
 FB_PLATFORM_DEFINE_FLAGS = -d SQLITE_OS_WIN
+# MinGW provides the C99 math functions SQLite enables for non-MSVC builds.
+# Set WINDOWS_C99_MATH=0 when using a Windows CRT that does not provide them.
+ifneq ($(findstring SQLITE_ENABLE_MATH_FUNCTIONS,$(FB_DEFINE_FLAGS)),)
+ifeq ($(WINDOWS_C99_MATH),1)
+ifeq ($(findstring SQLITE_HAVE_C99_MATH_FUNCS,$(FB_DEFINE_FLAGS)),)
+FB_PLATFORM_DEFINE_FLAGS += -d SQLITE_HAVE_C99_MATH_FUNCS=1
+endif
+endif
+endif
 FB_LINK_FLAGS ?= -l mingw32 -l mingwex -l msvcrt -l kernel32 -l user32 -l advapi32
 MEMDEBUG_BACKTRACE_FLAGS :=
 TARGET ?= build/sqlite3-fb-$(FB_TARGET).dll
@@ -212,7 +225,14 @@ ifneq ($(findstring SQLITE_ENABLE_STMTVTAB,$(FB_DEFINE_FLAGS)),)
 SOURCES += sqlite3_ext_stmtvtab.bas
 endif
 
-.PHONY: all clean check-interrupt audit-core-source-inventory audit-function-bodies audit-extension-function-bodies audit-extension-api-table check-wal-seh-bridge-wine check-wal-seh-bridge-win32-wine check-win32-wal-seh-fault-wine check-win64-wal-seh-fault-wine check-win-vfs-callback-abi check-rtree-matcharg-layout check-rtree-matcharg-layout-win32-wine check-walker-layout check-walker-layout-win32-wine regen-generated regen-api-declarations reconcile-function-status regen-extension-api-table regen-pragma-data bulk-candidates bulk-candidate-files bulk-candidate-files-loose check-bulk-candidates bulk-candidates-loose check-bulk-candidate-files-loose
+# The RBU implementation is an optional extension, not part of the default
+# SQLite core build. Include its FreeBASIC module only when enabled explicitly.
+ifneq ($(findstring SQLITE_ENABLE_RBU,$(FB_DEFINE_FLAGS)),)
+SOURCES += sqlite3_rbu.bas
+$(TARGET): sqlite3_rbu.bas sqlite3_rbu_types.bi
+endif
+
+.PHONY: all clean check-interrupt audit-core-source-inventory audit-function-bodies audit-extension-function-bodies audit-rbu-function-bodies audit-extension-api-table check-wal-seh-bridge-wine check-wal-seh-bridge-win32-wine check-win32-wal-seh-fault-wine check-win64-wal-seh-fault-wine check-win-vfs-callback-abi check-rtree-matcharg-layout check-rtree-matcharg-layout-win32-wine check-walker-layout check-walker-layout-win32-wine regen-generated regen-api-declarations reconcile-function-status regen-extension-api-table regen-pragma-data bulk-candidates bulk-candidate-files bulk-candidate-files-loose check-bulk-candidates bulk-candidates-loose check-bulk-candidate-files-loose
 
 check-win-vfs-callback-abi:
 	$(PYTHON) tools/check_win_vfs_callback_abi.py --dll "$(WIN_VFS_DLL)" --nm "$(LLVM_NM)"
@@ -424,6 +444,9 @@ audit-function-bodies: audit-core-source-inventory audit-extension-api-table
 audit-extension-function-bodies:
 	$(PYTHON) tools/check_function_body_coverage.py PORTING_EXTENSION_FUNCTIONS.csv
 
+audit-rbu-function-bodies:
+	$(PYTHON) tools/check_function_body_coverage.py PORTING_RBU_FUNCTIONS.csv
+
 audit-extension-api-table:
 	$(PYTHON) tools/check_extension_api_table_coverage.py
 
@@ -561,8 +584,12 @@ bulk-candidates-loose: regen-generated
 	$(MAKE) -C ../fb_tools/c2fb FBC='$(FBC)' converter
 	../fb_tools/c2fb/build/c2fb translate-preprocessed-tree ../src $(GEN_DIR) \
 		'$(LOOSE_CANDIDATE_DIR)' . '$(CC)' '$(THREADSAFE)' 1 '$(FEATURE_DEFINES)' '$(INCLUDE_EXISTING)' $(C2FB_BODY_OPTIONS)
+	../fb_tools/c2fb/build/c2fb translate-preprocessed-files ../src $(GEN_DIR) \
+		'$(PRAGMA_WIN_CANDIDATE_DIR)' . '$(PRAGMA_WIN_CC)' '$(THREADSAFE)' 1 \
+		'$(FEATURE_DEFINES)' '$(INCLUDE_EXISTING)' 'pragma.c' $(C2FB_BODY_OPTIONS)
 	$(CODEGEN) pragma-table $(LOOSE_CANDIDATE_DIR)/.c2fb_preprocessed/pragma.i \
-		sqlite3_pragma_data.bi sqlite3_pragma_data.bas
+		sqlite3_pragma_data.bi sqlite3_pragma_data.bas \
+		$(PRAGMA_WIN_CANDIDATE_DIR)/.c2fb_preprocessed/pragma.i
 	../fb_tools/c2fb/build/c2fb reconcile-functions PORTING_FUNCTIONS.csv .
 	../fb_tools/c2fb/build/c2fb api-routines $(LOOSE_CANDIDATE_DIR)/.c2fb_preprocessed/loadext.i PORTING_FUNCTIONS.csv sqlite3_bulk_loadext.bas sqlite3_extension_api_table.bi
 

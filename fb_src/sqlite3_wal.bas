@@ -518,7 +518,6 @@ Private Sub sehInjectFault CDecl Alias "sehInjectFault" ( _
     ' Fault-simulation point 650 models a shared-memory page fault.
     Dim simulatedError As SQLITE_C_INT = sqlite3FaultSim(650)
     If simulatedError = 0 Then Exit Sub
-
     Dim exceptionArguments(0 To 2) As SQLITE_SIZE_T
     exceptionArguments(0) = 0
     exceptionArguments(1) = 0
@@ -625,7 +624,8 @@ End Function
 Private Function walSehCatchHandle CDecl Alias "walSehCatchHandle" ( _
     ByVal pWalArgument As Any Ptr _
 ) As SQLITE_C_INT
-    Return walHandleException(CPtr(SqliteWal Ptr, pWalArgument))
+    Dim resultCode As SQLITE_C_INT = walHandleException(CPtr(SqliteWal Ptr, pWalArgument))
+    Return resultCode
 End Function
 #endif
 

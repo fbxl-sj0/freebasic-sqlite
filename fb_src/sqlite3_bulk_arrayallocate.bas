@@ -70,7 +70,6 @@ Function sqlite3ArrayAllocate CDecl Alias "sqlite3ArrayAllocate" ( _
     Return currentArray
 End Function
 
-/' end of sqlite3_bulk_arrayallocate.bas '/
 /'
 /*
 ** 2001 September 15
@@ -85,3 +84,4 @@ End Function
 *************************************************************************
 */
 '/
+/' end of sqlite3_bulk_arrayallocate.bas '/

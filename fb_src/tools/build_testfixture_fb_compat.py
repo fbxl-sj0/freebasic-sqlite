@@ -18,6 +18,9 @@ Responsibilities:
     - Ask the configured SQLite Makefile to link a separate compatibility
       fixture against libsqlite3-fb-testfixture-config-sync.so.
     - Allow isolated support-source directories for side-by-side test profiles.
+    - Omit explicitly named platform-incompatible test-support sources.
+    - Use imported engine globals for DLL builds instead of a duplicate C
+      global-state mirror that can desynchronize cross-process test state.
 
 This file intentionally does NOT contain:
 
@@ -391,6 +394,32 @@ def main() -> int:
         metavar="NAME",
         help="remove a configured feature from C test support; repeat as needed",
     )
+    parser.add_argument(
+        "--c-link-flag",
+        action="append",
+        default=[],
+        metavar="FLAG",
+        help="additional linker flag for the C test fixture; repeat as needed",
+    )
+    parser.add_argument(
+        "--exclude-source",
+        action="append",
+        default=[],
+        metavar="BASENAME",
+        help=(
+            "omit a named test-support source from this fixture; provide any "
+            "needed replacement symbols with --c-link-flag; repeat as needed"
+        ),
+    )
+    parser.add_argument(
+        "--omit-config-sync",
+        action="store_true",
+        help=(
+            "do not link src/global.c or the config-sync bridge; automatic for "
+            "Windows DLL import libraries, otherwise use when the engine "
+            "exports the internal globals used by test support"
+        ),
+    )
     args = parser.parse_args()
 
     repo = Path(__file__).resolve().parents[2]
@@ -402,6 +431,7 @@ def main() -> int:
         else build_root / "libsqlite3-fb-testfixture-config-sync.so"
     )
     library_dir = library.parent
+    windows_import_library = library.name.endswith(".dll.a")
     build_dir = (
         args.build_dir.resolve()
         if args.build_dir is not None
@@ -428,24 +458,55 @@ def main() -> int:
         repo / "src/test3.c": copies[1],
     }
     sources = [replacements.get(path, path) for path in sources]
+    source_basenames = {path.name for path in sources}
+    unknown_excludes = sorted(set(args.exclude_source) - source_basenames)
+    if unknown_excludes:
+        print(
+            "unknown test-support source exclusion: " + ", ".join(unknown_excludes),
+            file=sys.stderr,
+        )
+        return 2
+    if args.exclude_source:
+        excluded = set(args.exclude_source)
+        sources = [path for path in sources if path.name not in excluded]
+        print("Excluded test-support sources: " + ", ".join(sorted(excluded)))
     source_value = " ".join(str(path) for path in sources)
-    if args.c_define:
-        fixture_flags += " " + " ".join(f"-D{define}" for define in args.c_define)
-    if args.c_undefine:
-        fixture_flags += " " + " ".join(f"-U{define}" for define in args.c_undefine)
-    fixture_sources = (
-        f"$(TESTSRC) tclsqlite-ex.c {repo / 'src/global.c'} "
-        f"{fb_root / 'tests/sqlite_testfixture_config_sync.c'}"
-    )
+    definitions = list(args.c_define)
+    undefinitions = list(args.c_undefine)
+    if windows_import_library:
+        if not any(define.split("=", 1)[0] == "SQLITE_OS_WIN" for define in definitions):
+            definitions.append("SQLITE_OS_WIN=1")
+        if not any(define.split("=", 1)[0] == "SQLITE_OS_UNIX" for define in definitions):
+            definitions.append("SQLITE_OS_UNIX=0")
+        if "_HAVE_SQLITE_CONFIG_H" not in undefinitions:
+            undefinitions.append("_HAVE_SQLITE_CONFIG_H")
+        if "zipfile.c" in args.exclude_source and "SQLITE_HAVE_ZLIB" not in undefinitions:
+            undefinitions.append("SQLITE_HAVE_ZLIB")
+    if definitions:
+        fixture_flags += " " + " ".join(f"-D{define}" for define in definitions)
+    if undefinitions:
+        fixture_flags += " " + " ".join(f"-U{define}" for define in undefinitions)
+    fixture_sources = "$(TESTSRC) tclsqlite-ex.c"
+    use_imported_engine_globals = windows_import_library or args.omit_config_sync
+    if not use_imported_engine_globals:
+        fixture_sources += (
+            f" {repo / 'src/global.c'} "
+            f"{fb_root / 'tests/sqlite_testfixture_config_sync.c'}"
+        )
+    else:
+        print("Using engine-exported globals for the test fixture")
     library_name = library.name
     if library_name.startswith("lib"):
         library_name = library_name[3:]
-    if library_name.endswith(".so"):
+    if windows_import_library:
+        library_name = library_name[:-6]
+    elif library_name.endswith(".so"):
         library_name = library_name[:-3]
-    linker_flags = (
-        f"-L{library_dir} -l{library_name} "
-        f"-Wl,-rpath,{library_dir} -Wl,-E"
-    )
+    linker_flags = f"-L{library_dir} -l{library_name}"
+    if not windows_import_library:
+        linker_flags += f" -Wl,-rpath,{library_dir} -Wl,-E"
+    if args.c_link_flag:
+        linker_flags += " " + " ".join(args.c_link_flag)
     make_args = [
         "make",
         f"testfixture{args.suffix}",
@@ -456,6 +517,12 @@ def main() -> int:
         f"LDFLAGS.libsqlite3={linker_flags}",
     ]
     log_path = build_dir / "build.log"
+    # The generated script can otherwise retain settings from a different
+    # TCL_CONFIG_SH path because its prerequisite mtime is independent of the
+    # path value passed through MAKEFLAGS.
+    tcl_environment = repo / ".tclenv.sh"
+    if tcl_environment.exists():
+        tcl_environment.unlink()
     try:
         result = subprocess.run(
             make_args,

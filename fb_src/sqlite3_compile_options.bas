@@ -11,7 +11,7 @@
 
         - Preserve a stable, alphabetically ordered compile-option list.
         - Match option names case-insensitively with the optional SQLITE_ prefix.
-        - Report active threading, temporary-store, and enabled-feature profiles.
+        - Report active mutex, threading, temporary-store, and feature profiles.
         - Include the configured default page size in the option string.
 
     This file intentionally does NOT contain:
@@ -211,6 +211,13 @@ Declare Function sqlite3Strlen30 CDecl Alias "sqlite3Strlen30" ( _
 #define SQLITE_COMPILEOPTION_PREUPDATE_COUNT 0
 #define SQLITE_COMPILEOPTION_PREUPDATE_EXTRA
 #endif
+#ifdef SQLITE_ENABLE_RBU
+#define SQLITE_COMPILEOPTION_RBU_COUNT 1
+#define SQLITE_COMPILEOPTION_RBU_EXTRA @sqlite3CompileOptionNames(75),
+#else
+#define SQLITE_COMPILEOPTION_RBU_COUNT 0
+#define SQLITE_COMPILEOPTION_RBU_EXTRA
+#endif
 #ifdef SQLITE_ENABLE_STAT4
 #define SQLITE_COMPILEOPTION_STAT4_COUNT 1
 #define SQLITE_COMPILEOPTION_STAT4_EXTRA @sqlite3CompileOptionNames(51),
@@ -273,6 +280,7 @@ Declare Function sqlite3Strlen30 CDecl Alias "sqlite3Strlen30" ( _
     SQLITE_COMPILEOPTION_PERCENTILE_COUNT + _
     SQLITE_COMPILEOPTION_RTREE_COUNT + _
     SQLITE_COMPILEOPTION_PREUPDATE_COUNT + _
+    SQLITE_COMPILEOPTION_RBU_COUNT + _
     SQLITE_COMPILEOPTION_STAT4_COUNT + _
     SQLITE_COMPILEOPTION_SNAPSHOT_COUNT + _
     SQLITE_COMPILEOPTION_SCANSTATUS_COUNT + _
@@ -285,7 +293,7 @@ Declare Function sqlite3Strlen30 CDecl Alias "sqlite3Strlen30" ( _
     SQLITE_COMPILEOPTION_WHERETRACE_COUNT)
 
 ' Keep the text separate from the pointer table so every returned name is stable.
-Dim Shared As Const ZString * 40 sqlite3CompileOptionNames(0 To 72) = _
+Dim Shared As Const ZString * 40 sqlite3CompileOptionNames(0 To 75) = _
     { _
         "COMPILER=FreeBASIC", _
         "DEFAULT_AUTOVACUUM", _
@@ -359,17 +367,33 @@ Dim Shared As Const ZString * 40 sqlite3CompileOptionNames(0 To 72) = _
         "ENABLE_SESSION", _
         "NO_SYNC", _
         "ENABLE_STMTVTAB", _
-        "STRICT_SUBTYPE" _
+        "STRICT_SUBTYPE", _
+        "MUTEX_OMIT", _
+        "MUTEX_W32", _
+        "ENABLE_RBU" _
     }
 
-#if SQLITE_THREADSAFE = 0
+#if defined(SQLITE_MUTEX_NOOP)
 #define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(33)
-#define SQLITE_COMPILEOPTION_THREADSAFE @sqlite3CompileOptionNames(40)
-#elseif SQLITE_THREADSAFE = 2
+#elseif defined(SQLITE_MUTEX_OMIT)
+#define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(73)
+#elseif defined(SQLITE_MUTEX_PTHREADS)
 #define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(34)
-#define SQLITE_COMPILEOPTION_THREADSAFE @sqlite3CompileOptionNames(42)
+#elseif defined(SQLITE_MUTEX_W32)
+#define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(74)
+#elseif SQLITE_THREADSAFE = 0
+#define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(73)
+#elseif defined(SQLITE_OS_WIN)
+#define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(74)
 #else
 #define SQLITE_COMPILEOPTION_MUTEX @sqlite3CompileOptionNames(34)
+#endif
+
+#if SQLITE_THREADSAFE = 0
+#define SQLITE_COMPILEOPTION_THREADSAFE @sqlite3CompileOptionNames(40)
+#elseif SQLITE_THREADSAFE = 2
+#define SQLITE_COMPILEOPTION_THREADSAFE @sqlite3CompileOptionNames(42)
+#else
 #define SQLITE_COMPILEOPTION_THREADSAFE @sqlite3CompileOptionNames(41)
 #endif
 
@@ -413,6 +437,7 @@ Dim Shared As Const ZString Ptr sqlite3CompileOptionPointers(0 To SQLITE_COMPILE
         SQLITE_COMPILEOPTION_NORMALIZE_EXTRA _
         SQLITE_COMPILEOPTION_PERCENTILE_EXTRA _
         SQLITE_COMPILEOPTION_PREUPDATE_EXTRA _
+        SQLITE_COMPILEOPTION_RBU_EXTRA _
         SQLITE_COMPILEOPTION_RTREE_EXTRA _
         SQLITE_COMPILEOPTION_SESSION_EXTRA _
         SQLITE_COMPILEOPTION_SNAPSHOT_EXTRA _

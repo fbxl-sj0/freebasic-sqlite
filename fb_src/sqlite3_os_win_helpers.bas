@@ -3903,6 +3903,31 @@ End Function
 #endif
 
 #ifndef SQLITE_OMIT_WAL
+#ifdef SQLITE_WIN32_SHM_TRACE
+' Keep this trace opt-in: it records shared-view lifetime transitions without
+' adding diagnostic output to ordinary test or production builds.
+Private Sub winShmTrace( _
+    ByVal zEvent As Const ZString Ptr, _
+    ByVal pConnection As winShm Ptr, _
+    ByVal pNode As winShmNode Ptr _
+)
+    If zEvent = 0 Then Exit Sub
+    If pNode = 0 Then
+        sqlite3_log(SQLITE_NOTICE, _
+            StrPtr(!"win32-shm %s conn=%p node=NULL"), zEvent, pConnection)
+        Exit Sub
+    End If
+
+    Dim pMappedView As Any Ptr = 0
+    If pNode->aRegion <> 0 AndAlso pNode->nRegion > 0 Then _
+        pMappedView = pNode->aRegion[0].pMap
+    sqlite3_log(SQLITE_NOTICE, _
+        StrPtr(!"win32-shm %s conn=%p node=%p list=%p head=%p next=%p regions=%d map=%p path=%s"), _
+        zEvent, pConnection, pNode, pNode->pWinShmList, winShmNodeList, _
+        pNode->pNext, pNode->nRegion, pMappedView, pNode->zFilename)
+End Sub
+#endif
+
 Private Sub winShmPurge CDecl Alias "winShmPurge" ( _
     ByVal pVfs As sqlite3_vfs Ptr, _
     ByVal deleteFlag As SQLITE_C_INT _
@@ -3918,6 +3943,9 @@ Private Sub winShmPurge CDecl Alias "winShmPurge" ( _
     While pLink <> 0 AndAlso pLink[0] <> 0
         Dim pNode As winShmNode Ptr = pLink[0]
         If pNode->pWinShmList = 0 Then
+#ifdef SQLITE_WIN32_SHM_TRACE
+            winShmTrace(StrPtr(!"purge"), 0, pNode)
+#endif
             If pNode->mutex <> 0 Then sqlite3_mutex_free(pNode->mutex)
             If pNode->aRegion <> 0 Then
                 For i As SQLITE_C_INT = 0 To pNode->nRegion - 1
@@ -3942,6 +3970,9 @@ Private Sub winShmPurge CDecl Alias "winShmPurge" ( _
             End If
 
             pLink[0] = pNode->pNext
+#ifdef SQLITE_WIN32_SHM_TRACE
+            winShmTrace(StrPtr(!"purge-unlinked"), 0, pNode)
+#endif
             sqlite3_free(pNode->aRegion)
             sqlite3_free(pNode)
         Else
@@ -3966,6 +3997,9 @@ Private Function winCloseSharedMemory CDecl Alias "winCloseSharedMemory" ( _
         Return SQLITE_MISUSE
     End If
 
+#ifdef SQLITE_WIN32_SHM_TRACE
+    winShmTrace(StrPtr(!"close"), pConnection, pNode)
+#endif
     sqlite3_mutex_enter(pNode->mutex)
     Dim pLink As winShm Ptr Ptr = @pNode->pWinShmList
     While pLink <> 0 AndAlso pLink[0] <> 0 AndAlso _
@@ -3979,6 +4013,9 @@ Private Function winCloseSharedMemory CDecl Alias "winCloseSharedMemory" ( _
         Return SQLITE_MISUSE
     End If
     pLink[0] = pConnection->pWinShmNext
+#ifdef SQLITE_WIN32_SHM_TRACE
+    winShmTrace(StrPtr(!"unlink"), pConnection, pNode)
+#endif
     sqlite3_mutex_leave(pNode->mutex)
 
     winShmPurge(pDbFile->pVfs, deleteFlag)
@@ -4029,9 +4066,11 @@ Private Function winOpenSharedMemory( _
     sqlite3FileSuffix3(pDbFile->zPath, pNewNode->zFilename)
 #endif
 
-    Dim pNode As winShmNode Ptr = winShmNodeList
+    Dim pNode As winShmNode Ptr = 0
     Dim rc As SQLITE_C_INT = SQLITE_OK
     winShmEnterMutex()
+    ' Read the global list head after taking the mutex used by close/purge.
+    pNode = winShmNodeList
     While pNode <> 0
         If sqlite3StrICmp(pNode->zFilename, pNewNode->zFilename) = 0 Then _
             Exit While
@@ -4056,6 +4095,9 @@ Private Function winOpenSharedMemory( _
         If rc = SQLITE_OK Then
             pNode->pNext = winShmNodeList
             winShmNodeList = pNode
+#ifdef SQLITE_WIN32_SHM_TRACE
+            winShmTrace(StrPtr(!"insert"), pConnection, pNode)
+#endif
             pNewNode = 0
         Else
             If pNode->mutex <> 0 Then sqlite3_mutex_free(pNode->mutex)
@@ -4076,6 +4118,9 @@ Private Function winOpenSharedMemory( _
         pNode->nextShmId += 1
 #endif
         pDbFile->pShm = pConnection
+#ifdef SQLITE_WIN32_SHM_TRACE
+        winShmTrace(StrPtr(!"open"), pConnection, pNode)
+#endif
         sqlite3_mutex_leave(pNode->mutex)
     Else
         sqlite3_free(pConnection)
@@ -4264,6 +4309,9 @@ Private Function winShmMap CDecl ( _
             pNode->aRegion[regionCursor].pMap = mapBase
             pNode->aRegion[regionCursor].hMap = mapHandle
             pNode->nRegion += 1
+#ifdef SQLITE_WIN32_SHM_TRACE
+            winShmTrace(StrPtr(!"map"), pConnection, pNode)
+#endif
         Wend
     End If
 

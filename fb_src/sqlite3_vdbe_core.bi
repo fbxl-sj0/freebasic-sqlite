@@ -10,7 +10,7 @@
     Responsibilities:
 
         - Preserve the common VdbeOp, VdbeOpList, and Vdbe field order.
-        - Define P4 ownership tags and VDBE construction state values.
+        - Define known P4 union members, ownership tags, and VDBE states.
         - Declare VDBE creation, deletion, opcode append, and operand patching.
         - Declare the helper that attaches owned KeyInfo metadata to P4.
         - Preserve the heap frame fields used by nested VDBE programs.
@@ -131,6 +131,15 @@ Type SqliteVdbeSubProgramHeader
     nOp As SQLITE_C_INT
 End Type
 
+Type SqliteSubroutineSignature
+    selId As SQLITE_C_INT
+    bComplete As u8
+    zAff As ZString Ptr
+    iTable As SQLITE_C_INT
+    iAddr As SQLITE_C_INT
+    regReturn As SQLITE_C_INT
+End Type
+
 Union SqliteVdbeP4
     i As SQLITE_C_INT
     p As Any Ptr
@@ -139,6 +148,8 @@ Union SqliteVdbeP4
     ' Used when p4type is P4_VTAB for virtual-table update operations.
     pVtab As SqliteVtab Ptr
     pProgram As SqliteVdbeSubProgramHeader Ptr
+    ' Used when p4type is P4_SUBRTNSIG for a reusable IN subroutine.
+    pSubrtnSig As SqliteSubroutineSignature Ptr
     z As ZString Ptr
 End Union
 
@@ -167,15 +178,6 @@ Type SqliteVdbeOpList
     p1 As Byte
     p2 As Byte
     p3 As Byte
-End Type
-
-Type SqliteSubroutineSignature
-    selId As SQLITE_C_INT
-    bComplete As u8
-    zAff As ZString Ptr
-    iTable As SQLITE_C_INT
-    iAddr As SQLITE_C_INT
-    regReturn As SQLITE_C_INT
 End Type
 
 Type SqliteVdbeSubProgram

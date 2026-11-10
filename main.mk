@@ -1852,8 +1852,11 @@ TESTFIXTURE_SRC1 = sqlite3.c
 TESTFIXTURE_SRC = $(TESTSRC) tclsqlite-ex.c
 TESTFIXTURE_SRC += $(TESTFIXTURE_SRC$(USE_AMALGAMATION))
 
+# Tcl's mutex macros depend on this define. Test support uses Tcl mutexes
+# around shared pointer tables when its runtime is threaded.
 testfixture$(T.exe):	$(T.tcl.env.sh) has_tclsh85 $(TESTFIXTURE_SRC)
 	$(T.link.tcl) -DSQLITE_NO_SYNC=1 $(TESTFIXTURE_FLAGS) \
+		$$(test "$$TCL_THREADS" = "1" && printf '%s' '-DTCL_THREADS=1') \
 		-o $@ $(TESTFIXTURE_SRC) \
 		$$TCL_LIB_SPEC $$TCL_INCLUDE_SPEC $$TCL_LIBS \
 		$(LDFLAGS.libsqlite3)

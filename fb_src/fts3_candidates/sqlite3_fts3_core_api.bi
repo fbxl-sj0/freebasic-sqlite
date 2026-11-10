@@ -17,6 +17,10 @@
         - FTS3 private routines or database layouts.
         - SQLite test support.
 '/
+
+#ifndef SQLITE3_FTS3_CORE_API_BI
+#define SQLITE3_FTS3_CORE_API_BI
+
 #include once "crt/stdarg.bi"
 #include once "sqlite3_types.bi"
 #include once "sqlite3_constants.bi"
@@ -57,6 +61,8 @@ Declare Function sqlite3_column_count CDecl Alias "sqlite3_column_count" (ByVal 
 Declare Function sqlite3_column_int CDecl Alias "sqlite3_column_int" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As c2fb_c_int
 Declare Function sqlite3_column_int64 CDecl Alias "sqlite3_column_int64" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As c2fb_int64
 Declare Function sqlite3_column_name CDecl Alias "sqlite3_column_name" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As Const ZString Ptr
+Declare Function sqlite3_column_text CDecl Alias "sqlite3_column_text" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As Const UByte Ptr
+Declare Function sqlite3_column_type CDecl Alias "sqlite3_column_type" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As c2fb_c_int
 Declare Function sqlite3_column_value CDecl Alias "sqlite3_column_value" (ByVal arg0 As Any Ptr, ByVal arg1 As c2fb_c_int) As Any Ptr
 Declare Function sqlite3_create_module_v2 CDecl Alias "sqlite3_create_module_v2" (ByVal arg0 As Any Ptr, ByVal arg1 As Const ZString Ptr, ByVal arg2 As Const Any Ptr, ByVal arg3 As Any Ptr, ByVal arg4 As Any Ptr) As c2fb_c_int
 Declare Function sqlite3_overload_function CDecl Alias "sqlite3_overload_function" (ByVal arg0 As Any Ptr, ByVal arg1 As Const ZString Ptr, ByVal arg2 As c2fb_c_int) As c2fb_c_int
@@ -109,6 +115,8 @@ Declare Function sqlite3Fts3InitHashTable CDecl Alias "sqlite3Fts3InitHashTable"
 Declare Function sqlite3Fts3InitTok CDecl Alias "sqlite3Fts3InitTok" (ByVal arg0 As Any Ptr, ByVal arg1 As Fts3Hash Ptr, ByVal arg2 As Any Ptr) As c2fb_c_int
 #ifdef SQLITE_DEBUG
 Declare Function sqlite3Fts3Corrupt CDecl Alias "sqlite3Fts3Corrupt" () As c2fb_c_int
+#endif
+
 #endif
 
 /' end of fts3_candidates/sqlite3_fts3_core_api.bi '/

@@ -5,13 +5,13 @@
 
     Purpose:
 
-        Provide SQLITE_DEBUG-only PRAGMA entries and statistics reporting
+        Provide test/debug-only PRAGMA entries and statistics reporting
         that are absent from the default generated name table.
 
     Responsibilities:
 
-        - Resolve debug trace, VDBE-listing, and stats PRAGMAs.
-        - Merge debug-only names into PRAGMA pragma_list in sorted order.
+        - Resolve the lock-status and debug trace, VDBE-listing, and stats pragmas.
+        - Merge test/debug-only names into PRAGMA pragma_list in sorted order.
         - Emit table and index planner statistics for PRAGMA stats.
 
     This file intentionally does NOT contain:
@@ -70,20 +70,35 @@ Private Dim Shared As Const SqlitePragmaName debugPragmaEntries(0 To 7) = { _
 }
 #endif
 
-Function sqlite3DebugPragmaNameCount CDecl Alias "sqlite3DebugPragmaNameCount" () As SQLITE_C_INT Export
-#ifdef SQLITE_DEBUG
-    Return 8
-#else
-    Return 0
+#if defined(SQLITE_DEBUG) OrElse defined(SQLITE_TEST)
+' Match PragTyp_LOCK_STATUS and its two result columns in pragma.h.
+Private Dim Shared As Const ZString * 12 lockStatusPragmaName = "lock_status"
+Private Dim Shared As Const SqlitePragmaName lockStatusPragmaEntry = _
+    Type<SqlitePragmaName>(StrPtr(lockStatusPragmaName), 44, &H10, 53, 2, 0)
 #endif
+
+Function sqlite3DebugPragmaNameCount CDecl Alias "sqlite3DebugPragmaNameCount" () As SQLITE_C_INT Export
+    Dim resultCount As SQLITE_C_INT = 0
+#ifdef SQLITE_DEBUG
+    resultCount += 8
+#endif
+#if defined(SQLITE_DEBUG) OrElse defined(SQLITE_TEST)
+    resultCount += 1
+#endif
+    Return resultCount
 End Function
 
 Function sqlite3DebugPragmaNameAt CDecl Alias "sqlite3DebugPragmaNameAt" ( _
     ByVal index As SQLITE_C_INT _
 ) As Const SqlitePragmaName Ptr Export
+    Dim adjustedIndex As SQLITE_C_INT = index
+#if defined(SQLITE_DEBUG) OrElse defined(SQLITE_TEST)
+    If adjustedIndex = 0 Then Return @lockStatusPragmaEntry
+    adjustedIndex -= 1
+#endif
 #ifdef SQLITE_DEBUG
-    If index < 0 OrElse index >= 8 Then Return 0
-    Return @debugPragmaEntries(index)
+    If adjustedIndex < 0 OrElse adjustedIndex >= 8 Then Return 0
+    Return @debugPragmaEntries(adjustedIndex)
 #else
     Return 0
 #endif

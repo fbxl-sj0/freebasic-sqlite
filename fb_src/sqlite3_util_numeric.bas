@@ -64,7 +64,8 @@ Function sqlite3GetUInt32 CDecl Alias "sqlite3GetUInt32" ( _
     Dim position As Long = 0
     While z[position] >= Asc("0") AndAlso z[position] <= Asc("9")
         Dim digit As sqlite3_uint64 = CULngInt(z[position] - Asc("0"))
-        If value > (&HFFFFFFFF - digit) \ 10 Then Return 0
+        ' Keep the maximum unsigned 32-bit value wide on 32-bit targets.
+        If value > (&HFFFFFFFFULL - digit) \ 10ULL Then Return 0
         value = value * 10 + digit
         position += 1
     Wend

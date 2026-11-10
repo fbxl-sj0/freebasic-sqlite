@@ -64,6 +64,13 @@ Declare Function sqlite3VdbeQueryPerformanceCounter StdCall Lib "kernel32" _
 ) As SQLITE_C_INT
 #endif
 
+Declare Sub fbSqlite3VdbeLogAbort CDecl Alias "fbSqlite3VdbeLogAbort" ( _
+    ByVal pVdbe As SqliteVdbe Ptr, _
+    ByVal resultCode As SQLITE_C_INT, _
+    ByVal pOp As SqliteVdbeOp Ptr, _
+    ByVal aOp As SqliteVdbeOp Ptr _
+)
+
 Declare Function sqlite3VdbeCursorRestore CDecl Alias "sqlite3VdbeCursorRestore" ( _
     ByVal pCursor As SqliteVdbeCursor Ptr _
 ) As SQLITE_C_INT
@@ -72,6 +79,10 @@ Declare Sub sqlite3VdbeEnter CDecl Alias "sqlite3VdbeEnter" ( _
 )
 Declare Sub sqlite3VdbeLeave CDecl Alias "sqlite3VdbeLeave" ( _
     ByVal pVdbe As SqliteVdbe Ptr _
+)
+Declare Sub sqlite3SystemError CDecl Alias "sqlite3SystemError" ( _
+    ByVal db As sqlite3 Ptr, _
+    ByVal errorCode As SQLITE_C_INT _
 )
 Declare Function sqlite3VdbeIdxRowid CDecl Alias "sqlite3VdbeIdxRowid" ( _
     ByVal db As sqlite3 Ptr, _
@@ -837,6 +848,7 @@ Private Function sqlite3VdbeExecFinish( _
                     sqlite3VdbeLeave(pVdbe)
                     Return SQLITE_BUSY
                 End If
+                sqlite3SystemError(pVdbe->db, commitCode)
                 resultCode = commitCode
                 errorAction = OE_ROLLBACK
             Else
@@ -903,6 +915,7 @@ Private Function sqlite3VdbeExecFinish( _
                 If commitCode <> SQLITE_OK Then
                     ' The commit error is returned below; rollback itself is
                     ' an ordinary transaction abort.
+                    sqlite3SystemError(pVdbe->db, commitCode)
                     sqlite3RollbackAll(pVdbe->db, SQLITE_OK)
                     pVdbe->nChange = 0
                     pVdbe->db->autoCommit = 1
@@ -995,9 +1008,14 @@ End Function
 
 Private Function sqlite3VdbeExecError( _
     ByVal pVdbe As SqliteVdbe Ptr, _
+    ByVal pOp As SqliteVdbeOp Ptr, _
+    ByVal aOp As SqliteVdbeOp Ptr, _
     ByVal resultCode As SQLITE_C_INT _
 ) As SQLITE_C_INT
     If pVdbe = 0 OrElse pVdbe->db = 0 Then Return resultCode
+    sqlite3SystemError(pVdbe->db, resultCode)
+    ' Preserve SQLite's error-log notification before the VM cleanup path.
+    fbSqlite3VdbeLogAbort(pVdbe, resultCode, pOp, aOp)
     Dim errorAction As SQLITE_C_INT = pVdbe->errorAction
     If errorAction = 0 Then errorAction = OE_ABORT
     Dim finishCode As SQLITE_C_INT = _
@@ -2233,11 +2251,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
     ' Keep shared B-tree cursor state stable across the complete VM slice.
     sqlite3VdbeEnter(pVdbe)
+    Dim pOp As SqliteVdbeOp Ptr = pVdbe->aOp
+    If pVdbe->pc >= 0 AndAlso pVdbe->pc < pVdbe->nOp Then _
+        pOp = @pVdbe->aOp[pVdbe->pc]
     ' sqlite3_column_text() can fail while converting a result after
     ' sqlite3_step() has returned SQLITE_ROW. The next step must preserve
     ' that pending OOM instead of continuing the program and clearing pVdbe->rc.
     If pVdbe->rc = SQLITE_NOMEM Then _
-        Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 #if defined(SQLITE_ENABLE_IOTRACE) AndAlso Not defined(SQLITE_OMIT_TRACE)
     sqlite3VdbeIOTraceSql(pVdbe)
 #endif
@@ -2285,7 +2306,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         stmtScanStatusEnabled = 1
 #endif
     While programCounter < pVdbe->nOp
-        Dim pOp As SqliteVdbeOp Ptr = @pVdbe->aOp[programCounter]
+        pOp = @pVdbe->aOp[programCounter]
         Dim nextCounter As SQLITE_C_INT = programCounter + 1
         pVdbe->aCounter(SQLITE_STMTSTATUS_VM_STEP) += 1
 #ifdef SQLITE_TEST
@@ -2311,10 +2332,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_CollSeq
             If pOp->p4type <> P4_COLLSEQ Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p1 <> 0 Then
                 If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p1], 0)
             End If
 
@@ -2323,7 +2344,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p3 < pOp->p2 OrElse _
                pOp->p3 > 65535 OrElse pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSeekHitCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSeekHitCursor->seekHit < pOp->p2 Then
@@ -2337,10 +2358,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 < 0 OrElse pOp->p3 >= SQLITE3_VDBE_META_COUNT OrElse _
                (pVdbe->vdbeFlags And VDBE_BISREADER_MASK) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pDatabase As SqliteDbSlot Ptr = @pVdbe->db->aDb(pOp->p1)
             If pDatabase->pBt = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim metadataValue As u32 = 0
             sqlite3BtreeGetMeta( _
                 CPtr(Btree Ptr, pDatabase->pBt), pOp->p3, @metadataValue)
@@ -2354,12 +2375,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= SQLITE3_VDBE_META_COUNT OrElse _
                (pOp->p4type <> P4_NOTUSED AndAlso pOp->p4type <> P4_INT32) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             Dim pDatabase As SqliteDbSlot Ptr = @pVdbe->db->aDb(pOp->p1)
             If pDatabase->pBt = 0 OrElse pDatabase->pSchema = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 #ifdef SQLITE_DEBUG
             sqlite3VdbeIncrWriteCounter(pVdbe, 0)
 #endif
@@ -2386,16 +2407,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pVdbe->vdbeFlags And Not VDBE_EXPIRED_MASK
             End If
             If metadataCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, metadataCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, metadataCode)
 
 #ifndef SQLITE_OMIT_ANALYZE
         Case OP_LoadAnalysis
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim analysisCode As SQLITE_C_INT = _
                 sqlite3AnalysisLoad(pVdbe->db, pOp->p1)
             If analysisCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, analysisCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, analysisCode)
 #endif
 
 #ifndef SQLITE_OMIT_INTEGRITY_CHECK
@@ -2408,18 +2429,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pVdbe->db->aDb(pOp->p5).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p5) = 0 OrElse _
                (pVdbe->vdbeFlags And VDBE_BISREADER_MASK) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pRemainingErrors As SqliteVdbeMem Ptr = _
                 @pVdbe->aMem[pOp->p1]
             If (pRemainingErrors->flags And MEM_INT) = 0 OrElse _
                pRemainingErrors->u.i < 0 OrElse _
                pRemainingErrors->u.i >= &H7FFFFFFF Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRootPages As SQLITE_C_UINT Ptr = _
                 CPtr(SQLITE_C_UINT Ptr, pOp->p4.p)
             If pRootPages[0] <> CUInt(pOp->p2) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim maximumErrors As SQLITE_C_INT = CInt(pRemainingErrors->u.i + 1)
             Dim errorCount As SQLITE_C_INT = 0
@@ -2431,20 +2452,20 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p1 + 1])
             If integrityCode <> SQLITE_OK Then
                 sqlite3DbFree(pVdbe->db, zIntegrityError)
-                Return sqlite3VdbeExecError(pVdbe, integrityCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, integrityCode)
             End If
             If errorCount < 0 OrElse errorCount > maximumErrors Then
                 sqlite3DbFree(pVdbe->db, zIntegrityError)
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             If errorCount = 0 Then
                 If zIntegrityError <> 0 Then
                     sqlite3DbFree(pVdbe->db, zIntegrityError)
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 End If
             Else
                 If zIntegrityError = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pRemainingErrors->u.i -= errorCount - 1
                 Dim transientDestructor As sqlite3MemDestructor = _
                     CPtr(sqlite3MemDestructor, -1)
@@ -2453,7 +2474,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     transientDestructor)
                 sqlite3DbFree(pVdbe->db, zIntegrityError)
                 If messageCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, messageCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, messageCode)
             End If
 #endif
 
@@ -2464,12 +2485,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pVdbe->db->aDb(pOp->p3).pBt = 0 OrElse _
                pVdbe->db->aDb(pOp->p3).pSchema = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p3) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             If pVdbe->resetSchemaOnFault <> 0 AndAlso _
                pVdbe->resetSchemaOnFault <> pOp->p3 + 1 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
 #ifdef SQLITE_DEBUG
             sqlite3VdbeIncrWriteCounter(pVdbe, 0)
@@ -2477,7 +2498,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
             If pVdbe->db->nVdbeRead > pVdbe->db->nVDestroy + 1 Then
                 pVdbe->errorAction = OE_ABORT
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_LOCKED)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_LOCKED)
             End If
 
             Dim movedRootPage As SQLITE_C_INT = 0
@@ -2487,7 +2508,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             sqlite3VdbeMemSetInt64( _
                 @pVdbe->aMem[pOp->p2], movedRootPage)
             If destroyCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, destroyCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, destroyCode)
 
 #ifndef SQLITE_OMIT_AUTOVACUUM
             If movedRootPage <> 0 Then
@@ -2505,9 +2526,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 > SQLITE_CHECKPOINT_TRUNCATE OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 > pVdbe->nMem - 3 OrElse _
                pOp->p4type <> P4_NOTUSED OrElse pOp->p5 <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             Dim checkpointResults(0 To 2) As SQLITE_C_INT
             checkpointResults(0) = 0
             checkpointResults(1) = -1
@@ -2520,7 +2541,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 checkpointCode = SQLITE_OK
             End If
             If checkpointCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, checkpointCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, checkpointCode)
             For iCheckpointResult As SQLITE_C_INT = 0 To 2
                 sqlite3VdbeMemSetInt64( _
                     @pVdbe->aMem[pOp->p3 + iCheckpointResult], _
@@ -2536,22 +2557,22 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 (pOp->p3 < PAGER_JOURNALMODE_DELETE OrElse _
                  pOp->p3 > PAGER_JOURNALMODE_WAL)) OrElse _
                pOp->p4type <> P4_NOTUSED OrElse pOp->p5 <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             If pVdbe->db->aDb(pOp->p1).pBt = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pJournalBtree As Btree Ptr = _
                 CPtr(Btree Ptr, pVdbe->db->aDb(pOp->p1).pBt)
             Dim pJournalPager As Pager Ptr = sqlite3BtreePager(pJournalBtree)
             If pJournalPager = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim newJournalMode As SQLITE_C_INT = pOp->p3
             Dim oldJournalMode As SQLITE_C_INT = _
                 sqlite3PagerGetJournalMode(pJournalPager)
             If oldJournalMode < PAGER_JOURNALMODE_DELETE OrElse _
                oldJournalMode > PAGER_JOURNALMODE_WAL Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If newJournalMode = PAGER_JOURNALMODE_QUERY Then _
                 newJournalMode = oldJournalMode
             If sqlite3PagerOkToChangeJournalMode(pJournalPager) = 0 Then _
@@ -2610,13 +2631,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim journalTextCode As SQLITE_C_INT = sqlite3VdbeMemSetText( _
                 @pVdbe->aMem[pOp->p2], zJournalModeName, -1, 0)
             If journalTextCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, journalTextCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, journalTextCode)
             Dim journalEncodingCode As SQLITE_C_INT = sqlite3VdbeChangeEncoding( _
                 @pVdbe->aMem[pOp->p2], pVdbe->db->enc)
             If journalEncodingCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, journalEncodingCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, journalEncodingCode)
             If journalModeCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, journalModeCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, journalModeCode)
 #endif
 
 #ifndef SQLITE_OMIT_VIRTUALTABLE
@@ -2625,20 +2646,20 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 <> 0 OrElse pOp->p4type <> P4_NOTUSED OrElse _
                pOp->p5 <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             Dim virtualName As SqliteVdbeMem
             sqlite3VdbeMemInit(@virtualName, pVdbe->db, MEM_NULL)
             Dim copyNameCode As SQLITE_C_INT = sqlite3VdbeMemCopy( _
                 @virtualName, @pVdbe->aMem[pOp->p2])
             If copyNameCode <> SQLITE_OK Then
                 sqlite3VdbeMemRelease(@virtualName)
-                Return sqlite3VdbeExecError(pVdbe, copyNameCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, copyNameCode)
             End If
             If (virtualName.flags And MEM_STR) = 0 Then
                 sqlite3VdbeMemRelease(@virtualName)
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             Dim zVirtualName As Const ZString Ptr = CPtr( _
                 Const ZString Ptr, sqlite3ValueText(@virtualName, SQLITE_UTF8))
@@ -2652,24 +2673,24 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             End If
             sqlite3VdbeMemRelease(@virtualName)
             If createVtabCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, createVtabCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, createVtabCode)
 
         Case OP_VDestroy
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                (pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) OrElse pOp->p4.z = 0 OrElse _
                pVdbe->db->nVDestroy = &H7FFFFFFF Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pVdbe->db->nVDestroy += 1
             Dim destroyVtabCode As SQLITE_C_INT = sqlite3VtabCallDestroy( _
                 pVdbe->db, pOp->p1, pOp->p4.z)
             pVdbe->db->nVDestroy -= 1
             If destroyVtabCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, destroyVtabCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, destroyVtabCode)
 
         Case OP_VBegin
             If pOp->p4type <> P4_NOTUSED AndAlso pOp->p4type <> P4_VTAB Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pBeginVtable As SqliteVTable Ptr = 0
             If pOp->p4type = P4_VTAB AndAlso pOp->p4.p <> 0 Then _
                 pBeginVtable = CPtr(SqliteVTable Ptr, pOp->p4.p)
@@ -2678,19 +2699,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pBeginVtable <> 0 AndAlso pBeginVtable->pVtab <> 0 Then _
                 sqlite3VtabImportErrmsg(pVdbe, pBeginVtable->pVtab)
             If beginVtabCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, beginVtabCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, beginVtabCode)
 
         Case OP_VRename
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p4type <> P4_VTAB OrElse pOp->p4.p = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRenameTable As SqliteVTable Ptr = _
                 CPtr(SqliteVTable Ptr, pOp->p4.p)
             If pRenameTable->pVtab = 0 OrElse _
                pRenameTable->pVtab->pModule = 0 OrElse _
                pRenameTable->pVtab->pModule->xRename = 0 OrElse _
                (pVdbe->aMem[pOp->p1].flags And MEM_STR) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim legacyAlterWasSet As SQLITE_C_INT = CInt( _
                 (pVdbe->db->flags And SQLITE_LegacyAlter) <> 0)
             pVdbe->db->flags Or= SQLITE_LegacyAlter
@@ -2707,20 +2728,20 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             sqlite3VtabImportErrmsg(pVdbe, pRenameTable->pVtab)
             pVdbe->vdbeFlags = pVdbe->vdbeFlags And Not VDBE_EXPIRED_MASK
             If renameCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, renameCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, renameCode)
 #endif
 
         Case OP_ParseSchema
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                pVdbe->db->aDb(pOp->p1).pSchema = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim parseSchemaCode As SQLITE_C_INT = SQLITE_OK
             If pOp->p4.z = 0 Then
                 If pOp->p5 = 0 OrElse _
                    (pOp->p4type <> P4_NOTUSED AndAlso _
                     pOp->p4type <> P4_DYNAMIC) Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 sqlite3SchemaClear(pVdbe->db->aDb(pOp->p1).pSchema)
                 pVdbe->db->mDbFlags = pVdbe->db->mDbFlags And _
                     Not SQLITE3_VDBE_DBFLAG_SCHEMA_KNOWN_OK
@@ -2736,9 +2757,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pOp->p4type <> P4_STATIC AndAlso _
                     pOp->p4type <> P4_DYNAMIC) OrElse _
                    pVdbe->db->aDb(pOp->p1).zDbSName = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pVdbe->db->init.busy <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_LOCKED)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_LOCKED)
 
                 Dim initData As SqliteInitData
                 initData.db = pVdbe->db
@@ -2772,7 +2793,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             End If
             If parseSchemaCode <> SQLITE_OK Then
                 sqlite3ResetAllSchemasOfConnection(pVdbe->db)
-                Return sqlite3VdbeExecError(pVdbe, parseSchemaCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, parseSchemaCode)
             End If
 
         Case OP_SqlExec
@@ -2780,7 +2801,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <> 0 OrElse pOp->p5 <> 0 OrElse pOp->p4.z = 0 OrElse _
                (pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
 #ifdef SQLITE_DEBUG
             sqlite3VdbeIncrWriteCounter(pVdbe, 0)
@@ -2810,7 +2831,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     sqlite3VdbeError(pVdbe, StrPtr(!"%s"), sqlExecError)
                 sqlite3DbFree(pVdbe->db, sqlExecError)
                 If sqlExecCode = SQLITE_OK Then sqlExecCode = SQLITE_ERROR
-                Return sqlite3VdbeExecError(pVdbe, sqlExecCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sqlExecCode)
             End If
 
         Case OP_DropTable, OP_DropIndex, OP_DropTrigger
@@ -2820,9 +2841,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) OrElse _
                pVdbe->db->aDb(pOp->p1).pSchema = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
 #ifdef SQLITE_DEBUG
             sqlite3VdbeIncrWriteCounter(pVdbe, 0)
 #endif
@@ -2847,7 +2868,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p1 > pVdbe->nMem OrElse _
                pOp->p2 > pVdbe->nMem - pOp->p1 + 1 OrElse _
                (pOp->p2 > 0 AndAlso pVdbe->aMem = 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim preserveMask As u32 = CUInt(pOp->p3)
             For iRegister As SQLITE_C_INT = 0 To pOp->p2 - 1
                 Dim shouldRelease As SQLITE_C_INT = 1
@@ -2873,14 +2894,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                (pOp->p5 <> 0 AndAlso pOp->p5 <> 1) OrElse _
                (pOp->p5 <> 0 AndAlso pOp->p4type <> P4_INT32) OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p1) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p2 <> 0 Then
                 If (pVdbe->db->flags And _
                     SQLITE3_VDBE_DBFLAG_QUERY_ONLY) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
                 If (pVdbe->db->flags And _
                     SQLITE3_VDBE_DBFLAG_CORRUPT_RDONLY) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
             Dim pTransactionDatabase As SqliteDbSlot Ptr = _
@@ -2898,7 +2919,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     Return transactionCode
                 End If
                 If transactionCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, transactionCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, transactionCode)
 
                 If pOp->p2 <> 0 AndAlso _
                    (pVdbe->vdbeFlags And _
@@ -2907,7 +2928,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pVdbe->db->nVdbeRead > 1) Then
                     If pVdbe->iStatement = 0 Then
                         If pVdbe->db->nStatement = &H7FFFFFFF Then _
-                            Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                         pVdbe->db->nStatement += 1
                         pVdbe->iStatement = _
                             pVdbe->db->nSavepoint + pVdbe->db->nStatement
@@ -2920,11 +2941,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pVdbe->nStmtDefCons = pVdbe->db->nDeferredCons
                     pVdbe->nStmtDefImmCons = pVdbe->db->nDeferredImmCons
                     If transactionCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, transactionCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, transactionCode)
                 End If
 
                 If pTransactionDatabase->pSchema = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pOp->p5 <> 0 AndAlso _
                    (schemaCookie <> pOp->p3 OrElse _
                    pTransactionDatabase->pSchema->iGeneration <> pOp->p4.i) Then
@@ -2937,7 +2958,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         Not VDBE_EXPIRED_MASK) Or 1
                     pVdbe->vdbeFlags = pVdbe->vdbeFlags And _
                         Not VDBE_CHANGECOUNT_MASK
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_SCHEMA)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_SCHEMA)
                 End If
             End If
             pVdbe->vdbeFlags Or= VDBE_BISREADER_MASK
@@ -2948,7 +2969,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If (pOp->p1 <> 0 AndAlso pOp->p1 <> 1) OrElse _
                (pOp->p2 <> 0 AndAlso pOp->p2 <> 1) OrElse _
                (pOp->p1 = 0 AndAlso pOp->p2 <> 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pVdbe->db->autoCommit = CByte(pOp->p1) Then
                 Dim autoCommitError As Const ZString Ptr
                 If pOp->p1 = 0 Then
@@ -2959,7 +2980,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     autoCommitError = StrPtr(!"cannot commit - no transaction is active")
                 End If
                 sqlite3VdbeError(pVdbe, StrPtr(!"%s"), autoCommitError)
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_ERROR)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_ERROR)
             End If
 
             If pOp->p2 <> 0 Then
@@ -2968,12 +2989,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ElseIf pOp->p1 <> 0 AndAlso pVdbe->db->nVdbeWrite > 0 Then
                 sqlite3VdbeError( _
                     pVdbe, StrPtr(!"cannot commit transaction - SQL statements in progress"))
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_BUSY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_BUSY)
             ElseIf pOp->p1 <> 0 Then
                 Dim deferredCode As SQLITE_C_INT = _
                     sqlite3VdbeCheckFkDeferred(pVdbe)
                 If deferredCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, deferredCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, deferredCode)
                 pVdbe->db->autoCommit = 1
             Else
                 pVdbe->db->autoCommit = 0
@@ -3002,7 +3023,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pOp->p1 <> SAVEPOINT_ROLLBACK) OrElse _
                pOp->p4.z = 0 OrElse _
                (pOp->p4type <> P4_STATIC AndAlso pOp->p4type <> P4_DYNAMIC) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pNameBytes As Const UByte Ptr = CPtr(Const UByte Ptr, pOp->p4.z)
             Dim nameLength As sqlite3_uint64 = 0
@@ -3011,23 +3032,23 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If nameLength >= CULngInt(pVdbe->db->lengthLimit) OrElse _
                    nameLength > SQLITE_MAX_ALLOCATION_SIZE - _
                        SizeOf(SqliteSavepoint) - 1 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             Wend
 
             If pOp->p1 = SAVEPOINT_BEGIN Then
                 If pVdbe->db->nVdbeWrite > 0 Then
                     sqlite3VdbeError( _
                         pVdbe, StrPtr(!"cannot open savepoint - SQL statements in progress"))
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_BUSY)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_BUSY)
                 End If
                 If pVdbe->db->nStatement > &H7FFFFFFF - _
                    pVdbe->db->nSavepoint Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 Dim vtabSavepointCode As SQLITE_C_INT = sqlite3VtabSavepoint( _
                     pVdbe->db, SAVEPOINT_BEGIN, _
                     pVdbe->db->nStatement + pVdbe->db->nSavepoint)
                 If vtabSavepointCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, vtabSavepointCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, vtabSavepointCode)
 
                 Dim allocationBytes As sqlite3_uint64 = _
                     CULngInt(SizeOf(SqliteSavepoint)) + nameLength + 1
@@ -3035,7 +3056,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     SqliteSavepoint Ptr, _
                     sqlite3DbMallocZero(pVdbe->db, allocationBytes))
                 If pNewSavepoint = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
                 pNewSavepoint->zName = CPtr( _
                     ZString Ptr, CPtr(UByte Ptr, pNewSavepoint) + _
                     SizeOf(SqliteSavepoint))
@@ -3053,7 +3074,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Else
                     If pVdbe->db->nSavepoint = &H7FFFFFFF Then
                         sqlite3DbFree(pVdbe->db, pNewSavepoint)
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                     End If
                     pVdbe->db->nSavepoint += 1
                 End If
@@ -3063,7 +3084,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                    pVdbe->db->nVdbeWrite > 0 Then
                     sqlite3VdbeError( _
                         pVdbe, StrPtr(!"cannot release savepoint - SQL statements in progress"))
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_BUSY)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_BUSY)
                 End If
 
                 Dim pSavepoint As SqliteSavepoint Ptr = _
@@ -3077,7 +3098,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If pSavepoint = 0 Then
                     sqlite3VdbeError( _
                         pVdbe, StrPtr(!"no such savepoint: %s"), pOp->p4.z)
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_ERROR)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_ERROR)
                 End If
                 Dim isTransactionSavepoint As SQLITE_C_INT = IIf( _
                     pSavepoint->pNext = 0 AndAlso _
@@ -3091,13 +3112,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         If pOther <> pVdbe AndAlso _
                            pOther->eVdbeState = VDBE_RUN_STATE AndAlso _
                            (pOther->vdbeFlags And VDBE_READONLY_MASK) = 0 Then _
-                            Return sqlite3VdbeExecError(pVdbe, SQLITE_BUSY)
+                            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_BUSY)
                         pOther = CPtr(SqliteVdbe Ptr, pOther->pVNext)
                     Wend
                     Dim deferredCode As SQLITE_C_INT = _
                         sqlite3VdbeCheckFkDeferred(pVdbe)
                     If deferredCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, deferredCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, deferredCode)
                     pVdbe->db->autoCommit = 1
                     Dim haltCode As SQLITE_C_INT = sqlite3VdbeHalt(pVdbe)
                     If haltCode = SQLITE_BUSY Then
@@ -3126,7 +3147,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                      savepointIndex >= pVdbe->db->nSavepoint)) OrElse _
                    (isTransactionSavepoint <> 0 AndAlso _
                     pOp->p1 = SAVEPOINT_ROLLBACK AndAlso savepointIndex <> -1) Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
                 Dim isSchemaChange As SQLITE_C_INT = CInt( _
                     (pVdbe->db->mDbFlags And _
@@ -3143,7 +3164,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                                     pSavepointBtree, SQLITE_ABORT_ROLLBACK, _
                                     tripWriteOnly)
                             If tripCode <> SQLITE_OK Then _
-                                Return sqlite3VdbeExecError(pVdbe, tripCode)
+                                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, tripCode)
                         End If
                     Next
                 End If
@@ -3156,7 +3177,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                             sqlite3BtreeSavepoint( _
                                 pSavepointBtree, pOp->p1, savepointIndex)
                         If savepointCode <> SQLITE_OK Then _
-                            Return sqlite3VdbeExecError(pVdbe, savepointCode)
+                            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, savepointCode)
                     End If
                 Next
 
@@ -3170,7 +3191,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     Dim pNested As SqliteSavepoint Ptr = _
                         CPtr(SqliteSavepoint Ptr, pVdbe->db->pSavepoint)
                     If pNested = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     pVdbe->db->pSavepoint = pNested->pNext
                     sqlite3DbFree(pVdbe->db, pNested)
                     If pVdbe->db->nSavepoint > 0 Then _
@@ -3195,7 +3216,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         sqlite3VtabSavepoint( _
                             pVdbe->db, pOp->p1, savepointIndex)
                     If vtabSavepointCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, vtabSavepointCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, vtabSavepointCode)
                 End If
             End If
 
@@ -3204,14 +3225,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p4type <> P4_VTAB OrElse pOp->p4.p = 0 OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVirtualTable As SqliteVTable Ptr = _
                 CPtr(SqliteVTable Ptr, pOp->p4.p)
             Dim pVirtualTableInstance As SqliteVtab Ptr = pVirtualTable->pVtab
             If pVirtualTableInstance = 0 OrElse _
                pVirtualTableInstance->pModule = 0 OrElse _
                pVirtualTableInstance->pModule->xOpen = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_LOCKED)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_LOCKED)
 
             If pVdbe->apCsr[pOp->p1] <> 0 Then
                 Dim pExistingCursor As SqliteVdbeCursor Ptr = _
@@ -3229,9 +3250,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 xOpen(pVirtualTableInstance, @pNewVtabCursor)
             sqlite3VtabImportErrmsg(pVdbe, pVirtualTableInstance)
             If openVtabCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, openVtabCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, openVtabCode)
             If pNewVtabCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pNewVtabCursor->pVtab = pVirtualTableInstance
 
             If pVdbe->apCsr[pOp->p1] <> 0 Then
@@ -3246,7 +3267,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         pVirtualTableInstance->pModule->xClose)
                     xClose(pNewVtabCursor)
                 End If
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
             End If
             Dim pVtabCursor As SqliteVdbeCursor Ptr = allocateCursor( _
                 pVdbe, pOp->p1, 0, CURTYPE_VTAB)
@@ -3257,7 +3278,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         pVirtualTableInstance->pModule->xClose)
                     xClose(pNewVtabCursor)
                 End If
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             End If
             pVtabCursor->uc.pVtabCursor = pNewVtabCursor
             pVirtualTableInstance->nRef += 1
@@ -3272,12 +3293,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pVdbe->db->aDb(pOp->p3).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p3) = 0 OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim reopenKeyInfo As Any Ptr = pOp->p4.p
             Dim reopenFieldCount As SQLITE_C_INT = _
                 CPtr(sqlite3VdbeKeyInfoPrefix Ptr, reopenKeyInfo)->nAllField
             If reopenFieldCount < 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pReopenCursor As SqliteVdbeCursor Ptr = 0
             If pVdbe->apCsr[pOp->p1] <> 0 Then
@@ -3285,7 +3306,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
                 If pReopenCursor->eCurType <> CURTYPE_BTREE OrElse _
                    pReopenCursor->uc.pCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
             If pReopenCursor <> 0 AndAlso _
@@ -3296,11 +3317,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 ' A rollback that changed the schema expires active VDBEs.
                 ' Reject opening a new root from the schema that was undone.
                 If (pVdbe->vdbeFlags And VDBE_EXPIRED_MASK) = 1 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_ABORT_ROLLBACK)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_ABORT_ROLLBACK)
                 pReopenCursor = allocateCursor( _
                     pVdbe, pOp->p1, reopenFieldCount, CURTYPE_BTREE)
                 If pReopenCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
                 pReopenCursor->iDb = CByte(pOp->p3)
                 pReopenCursor->nullRow = 1
                 pReopenCursor->cursorFlags Or= VDBE_CURSOR_ORDERED
@@ -3315,7 +3336,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pReopenCursor->uc.pCursor)
                 If reopenCode <> SQLITE_OK Then
                     pVdbe->apCsr[pOp->p1] = 0
-                    Return sqlite3VdbeExecError(pVdbe, reopenCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, reopenCode)
                 End If
             End If
             sqlite3BtreeCursorHintFlags( _
@@ -3328,19 +3349,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pVdbe->db->aDb(pOp->p3).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p3) = 0 OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_EXPIRED_MASK) = 1 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_ABORT_ROLLBACK)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_ABORT_ROLLBACK)
             Dim rootPage As u32
             Dim writeFlags As SQLITE_C_INT = 0
             If pOp->opcode = OP_OpenWrite Then
                 If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
                 writeFlags = BTREE_WRCSR Or (pOp->p5 And OPFLAG_FORDELETE)
                 Dim pWriteSchema As SqliteSchema Ptr = _
                     pVdbe->db->aDb(pOp->p3).pSchema
                 If pWriteSchema = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 ' Record encoding must respect the oldest file format among
                 ' databases this statement writes. This controls compact 0/1
                 ' integer serial types in OP_MakeRecord.
@@ -3349,33 +3370,33 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If (pOp->p5 And OPFLAG_P2ISREG) <> 0 Then
                     If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                        (pVdbe->aMem[pOp->p2].flags And MEM_INT) = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     rootPage = CUInt(pVdbe->aMem[pOp->p2].u.i)
                 Else
-                    If pOp->p2 <= 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    If pOp->p2 <= 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     rootPage = CUInt(pOp->p2)
                 End If
             Else
                 ' Let sqlite3BtreeCursor decide whether root page zero is valid.
                 If pOp->p2 < 0 OrElse (pOp->p5 And Not OPFLAG_SEEKEQ) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 rootPage = CUInt(pOp->p2)
             End If
             Dim fieldCount As SQLITE_C_INT = 0
             Dim pKeyInfo As Any Ptr = 0
             If pOp->p4type = P4_KEYINFO Then
-                If pOp->p4.p = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                If pOp->p4.p = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pKeyInfo = pOp->p4.p
                 fieldCount = CPtr(sqlite3VdbeKeyInfoPrefix Ptr, pKeyInfo)->nAllField
             ElseIf pOp->p4type = P4_INT32 Then
                 fieldCount = pOp->p4.i
             ElseIf pOp->p4type <> P4_NOTUSED Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
-            If fieldCount < 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            If fieldCount < 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = allocateCursor( _
                 pVdbe, pOp->p1, fieldCount, CURTYPE_BTREE)
-            If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+            If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             pCursor->iDb = CByte(pOp->p3)
             pCursor->nullRow = 1
             pCursor->cursorFlags Or= VDBE_CURSOR_ORDERED
@@ -3391,7 +3412,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pBtree, pCursor->pgnoRoot, writeFlags, pKeyInfo, pCursor->uc.pCursor)
             If rc <> SQLITE_OK Then
                 pVdbe->apCsr[pOp->p1] = 0
-                Return sqlite3VdbeExecError(pVdbe, rc)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
             sqlite3BtreeCursorHintFlags( _
                 pCursor->uc.pCursor, pOp->p5 And (BTREE_BULKLOAD Or BTREE_SEEK_EQ))
@@ -3399,12 +3420,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_CursorLock, OP_CursorUnlock
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pLockCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pLockCursor->eCurType <> CURTYPE_BTREE OrElse _
                pLockCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->opcode = OP_CursorLock Then
                 sqlite3BtreeCursorPin(pLockCursor->uc.pCursor)
             Else
@@ -3417,7 +3438,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p3 < 0 OrElse pOp->p3 > 1 OrElse _
                pVdbe->db->aDb(pOp->p1).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p1) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p3 <> 0 OrElse _
                (pVdbe->db->flags And _
                 SQLITE3_VDBE_DBFLAG_READ_UNCOMMIT) = 0 Then
@@ -3434,7 +3455,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                             pVdbe, StrPtr(!"database table is locked: %s"), _
                             zTableName)
                     End If
-                    Return sqlite3VdbeExecError(pVdbe, tableLockCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, tableLockCode)
                 End If
             End If
 #endif
@@ -3443,11 +3464,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_ColumnsUsed
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pColumnCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pColumnCursor->eCurType <> CURTYPE_BTREE Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pColumnCursor->maskUsed = _
                 (CULngInt(CUInt(pOp->p3)) Shl 32) Or CULngInt(CUInt(pOp->p2))
 #endif
@@ -3456,17 +3477,17 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pEmptyCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pEmptyCursor->eCurType <> CURTYPE_BTREE OrElse _
                pEmptyCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim isEmpty As SQLITE_C_INT = 0
             Dim emptyCheckCode As SQLITE_C_INT = sqlite3BtreeIsEmpty( _
                 pEmptyCursor->uc.pCursor, @isEmpty)
             If emptyCheckCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, emptyCheckCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, emptyCheckCode)
             If isEmpty <> 0 Then nextCounter = pOp->p2
 
         Case OP_IfSizeBetween
@@ -3476,22 +3497,22 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p4type <> P4_INT32 OrElse _
                pOp->p4.i < -1 OrElse pOp->p4.i > 1280 OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSizeCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSizeCursor->eCurType <> CURTYPE_BTREE OrElse _
                pSizeCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim isSizeCursorEmpty As SQLITE_C_INT = 0
             Dim sizeCheckCode As SQLITE_C_INT = sqlite3BtreeFirst( _
                 pSizeCursor->uc.pCursor, @isSizeCursorEmpty)
             If sizeCheckCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, sizeCheckCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sizeCheckCode)
             Dim sizeEstimate As sqlite3_int64 = -1
             If isSizeCursorEmpty = 0 Then
                 sizeEstimate = sqlite3BtreeRowCountEst(pSizeCursor->uc.pCursor)
                 If sizeEstimate <= 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 sizeEstimate = sqlite3LogEst(CULngInt(sizeEstimate))
             End If
             If sizeEstimate >= pOp->p3 AndAlso sizeEstimate <= pOp->p4.i Then _
@@ -3499,27 +3520,27 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_OpenEphemeral, OP_OpenAutoindex
             If pOp->opcode = OP_OpenAutoindex AndAlso pOp->p3 <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim openCode As SQLITE_C_INT = vdbeOpenEphemeralCursor(pVdbe, pOp)
-            If openCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, openCode)
+            If openCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, openCode)
 
         Case OP_OpenDup
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nCursor OrElse _
                pOp->p1 = pOp->p2 OrElse pOp->p5 <> 0 OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p2] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pOriginalCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p2])
             If pOriginalCursor->eCurType <> CURTYPE_BTREE OrElse _
                (pOriginalCursor->cursorFlags And VDBE_CURSOR_EPHEMERAL) = 0 OrElse _
                pOriginalCursor->ub.pBtx = 0 OrElse _
                pOriginalCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pDuplicateCursor As SqliteVdbeCursor Ptr = allocateCursor( _
                 pVdbe, pOp->p1, pOriginalCursor->nField, CURTYPE_BTREE)
             If pDuplicateCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
             pDuplicateCursor->nullRow = 1
             pDuplicateCursor->cursorFlags = pOriginalCursor->cursorFlags Or _
@@ -3537,18 +3558,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pDuplicateCursor->uc.pCursor)
             If duplicateOpenCode <> SQLITE_OK Then
                 pVdbe->apCsr[pOp->p1] = 0
-                Return sqlite3VdbeExecError(pVdbe, duplicateOpenCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, duplicateOpenCode)
             End If
 
         Case OP_SorterOpen
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p4type <> P4_KEYINFO OrElse _
                pOp->p4.p = 0 OrElse pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSorterCursor As SqliteVdbeCursor Ptr = allocateCursor( _
                 pVdbe, pOp->p1, pOp->p2, CURTYPE_SORTER)
             If pSorterCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             pSorterCursor->pKeyInfo = pOp->p4.p
             pSorterCursor->nullRow = 1
             Dim sorterOpenCode As SQLITE_C_INT = sqlite3VdbeSorterInit( _
@@ -3556,20 +3577,20 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If sorterOpenCode <> SQLITE_OK Then
                 sqlite3VdbeFreeCursorNN(pVdbe, pSorterCursor)
                 pVdbe->apCsr[pOp->p1] = 0
-                Return sqlite3VdbeExecError(pVdbe, sorterOpenCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sorterOpenCode)
             End If
 
         Case OP_SequenceTest
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSequenceCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSequenceCursor->eCurType <> CURTYPE_SORTER Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pSequenceCursor->seqCount = 9223372036854775807LL Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
             If pSequenceCursor->seqCount = 0 Then nextCounter = pOp->p2
             pSequenceCursor->seqCount += 1
 
@@ -3580,10 +3601,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp OrElse _
                pOp->p3 < 0 OrElse pOp->p3 >= pVdbe->nOp OrElse _
                pVdbe->aMem = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCoroutine As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pCoroutine->flags And MEM_DYN) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             sqlite3VdbeMemSetInt64(pCoroutine, pOp->p3 - 1)
             If pOp->p2 <> 0 Then nextCounter = pOp->p2
 
@@ -3593,11 +3614,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 <= 0 OrElse pOp->p1 > maxCoroutineRegister OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp OrElse _
                pVdbe->aMem = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCoroutine As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If pCoroutine->flags <> MEM_INT OrElse _
                pCoroutine->u.i < -1 OrElse pCoroutine->u.i >= pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim resumeAddress As SQLITE_C_INT = CInt(pCoroutine->u.i)
             pCoroutine->u.i = programCounter
             nextCounter = resumeAddress + 1
@@ -3607,18 +3628,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pVdbe->nMem - pVdbe->nCursor
             If pOp->p1 <= 0 OrElse pOp->p1 > maxCoroutineRegister OrElse _
                pVdbe->aMem = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCoroutine As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If pCoroutine->flags <> MEM_INT OrElse _
                pCoroutine->u.i < 0 OrElse pCoroutine->u.i >= pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim callerYieldIndex As SQLITE_C_INT = CInt(pCoroutine->u.i)
             Dim pCallerYield As SqliteVdbeOp Ptr = _
                 @pVdbe->aOp[callerYieldIndex]
             If pCallerYield->opcode <> OP_Yield OrElse _
                pCallerYield->p2 < 0 OrElse pCallerYield->p2 >= pVdbe->nOp OrElse _
                programCounter <= 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pCoroutine->u.i = programCounter - 1
             nextCounter = pCallerYield->p2
 
@@ -3626,23 +3647,23 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSorterCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSorterCursor->eCurType <> CURTYPE_SORTER Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSorterRecord As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             If (pSorterRecord->flags And MEM_BLOB) = 0 OrElse _
                pSorterRecord->n <= 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim expandSorterCode As SQLITE_C_INT = _
                 sqlite3VdbeMemExpandBlob(pSorterRecord)
             If expandSorterCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, expandSorterCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, expandSorterCode)
             Dim sorterWriteCode As SQLITE_C_INT = _
                 sqlite3VdbeSorterWrite(pSorterCursor, pSorterRecord)
             If sorterWriteCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, sorterWriteCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sorterWriteCode)
 
         Case OP_SorterCompare
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
@@ -3650,17 +3671,17 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p4type <> P4_INT32 OrElse pOp->p4.i < 0 OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSorterCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSorterCursor->eCurType <> CURTYPE_SORTER Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim sorterCompareResult As SQLITE_C_INT = 0
             Dim sorterCompareCode As SQLITE_C_INT = sqlite3VdbeSorterCompare( _
                 pSorterCursor, @pVdbe->aMem[pOp->p3], pOp->p4.i, _
                 @sorterCompareResult)
             If sorterCompareCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, sorterCompareCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sorterCompareCode)
             If sorterCompareResult <> 0 Then nextCounter = pOp->p2
 
         Case OP_SorterData
@@ -3669,15 +3690,15 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 < 0 OrElse pOp->p3 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 OrElse _
                pVdbe->apCsr[pOp->p3] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pSorterCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pSorterCursor->eCurType <> CURTYPE_SORTER Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim sorterRowCode As SQLITE_C_INT = sqlite3VdbeSorterRowkey( _
                 pSorterCursor, @pVdbe->aMem[pOp->p2])
             If sorterRowCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, sorterRowCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, sorterRowCode)
             Dim pRowCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p3])
             pRowCursor->cacheStatus = CACHE_STALE
@@ -3686,10 +3707,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 >= pVdbe->nMem OrElse pOp->p3 < 0 OrElse _
                pOp->p5 <> 0 OrElse pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = allocateCursor( _
                 pVdbe, pOp->p1, pOp->p3, CURTYPE_PSEUDO)
-            If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+            If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             pCursor->iDb = 0
             pCursor->nullRow = 1
             pCursor->isTable = 1
@@ -3698,7 +3719,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_Close
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pVdbe->apCsr[pOp->p1] <> 0 Then
                 Dim pCursor As SqliteVdbeCursor Ptr = _
                     CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
@@ -3713,12 +3734,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p1) = 0 OrElse _
                (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 OrElse _
                (pOp->p3 <> BTREE_INTKEY AndAlso pOp->p3 <> BTREE_BLOBKEY) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_MISUSE)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISUSE)
             Dim rootPage As u32 = 0
             Dim pBtree As Btree Ptr = CPtr( _
                 Btree Ptr, pVdbe->db->aDb(pOp->p1).pBt)
             Dim rc As SQLITE_C_INT = sqlite3BtreeCreateTable(pBtree, @rootPage, pOp->p3)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], CULngInt(rootPage))
 
         Case OP_Rewind, OP_Sort, OP_SorterSort
@@ -3726,23 +3747,23 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pOp->p5 <> 0 OrElse pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim isEmpty As SQLITE_C_INT = 1
             Dim rc As SQLITE_C_INT
             If pCursor->eCurType = CURTYPE_SORTER Then
                 If pOp->opcode <> OP_SorterSort Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 rc = sqlite3VdbeSorterRewind(pCursor, @isEmpty)
             Else
                 If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                    pCursor->uc.pCursor = 0 OrElse pOp->opcode = OP_SorterSort Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 rc = sqlite3BtreeFirst(pCursor->uc.pCursor, @isEmpty)
                 pCursor->deferredMoveto = 0
             End If
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
 #ifdef SQLITE_TEST
             If pOp->opcode = OP_Sort OrElse pOp->opcode = OP_SorterSort Then
                 sqlite3_sort_count += 1
@@ -3762,20 +3783,20 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->opcode = OP_SeekEnd Then
-                If pOp->p2 <> 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                If pOp->p2 <> 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pCursor->seekResult = -1
                 If sqlite3BtreeCursorIsValidNN(pCursor->uc.pCursor) <> 0 Then _
                     Exit Select
             End If
             Dim isEmpty As SQLITE_C_INT = 1
             Dim rc As SQLITE_C_INT = sqlite3BtreeLast(pCursor->uc.pCursor, @isEmpty)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             pCursor->nullRow = CByte(isEmpty)
             pCursor->deferredMoveto = 0
             pCursor->cacheStatus = CACHE_STALE
@@ -3788,11 +3809,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim entryCount As sqlite3_int64 = 0
             Dim rc As SQLITE_C_INT
             If pOp->p3 <> 0 Then
@@ -3800,7 +3821,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Else
                 rc = sqlite3BtreeCount( _
                     pVdbe->db, pCursor->uc.pCursor, @entryCount)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], entryCount)
 
@@ -3809,7 +3830,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->db->aDb(pOp->p1).pBt = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim currentPageCount As u32 = sqlite3BtreeLastPage( _
                 CPtr(Btree Ptr, pVdbe->db->aDb(pOp->p1).pBt))
             sqlite3VdbeMemSetInt64( _
@@ -3819,7 +3840,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 < 0 OrElse pVdbe->db->aDb(pOp->p1).pBt = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pPageCountBtree As Btree Ptr = _
                 CPtr(Btree Ptr, pVdbe->db->aDb(pOp->p1).pBt)
             Dim requestedMaxPage As u32 = 0
@@ -3840,15 +3861,15 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->db->aDb(pOp->p1).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p1) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             Dim vacuumCode As SQLITE_C_INT = sqlite3BtreeIncrVacuum( _
                 CPtr(Btree Ptr, pVdbe->db->aDb(pOp->p1).pBt))
             If vacuumCode = SQLITE_DONE Then
                 nextCounter = pOp->p2
             ElseIf vacuumCode <> SQLITE_OK Then
-                Return sqlite3VdbeExecError(pVdbe, vacuumCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, vacuumCode)
             End If
 #endif
 
@@ -3859,15 +3880,15 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                (pOp->p2 <> 0 AndAlso pOp->p2 >= pVdbe->nMem) OrElse _
                pOp->p3 <> 0 OrElse _
                pOp->p4type <> P4_NOTUSED OrElse pOp->p5 <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             Dim pVacuumOutput As SqliteVdbeMem Ptr = 0
             If pOp->p2 <> 0 Then pVacuumOutput = @pVdbe->aMem[pOp->p2]
             Dim vacuumCode As SQLITE_C_INT = sqlite3RunVacuum( _
                 @pVdbe->zErrMsg, pVdbe->db, pOp->p1, pVacuumOutput)
             If vacuumCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, vacuumCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, vacuumCode)
 #endif
 
         Case OP_Clear
@@ -3875,28 +3896,28 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 >= pVdbe->db->nDb OrElse _
                pVdbe->db->aDb(pOp->p2).pBt = 0 OrElse _
                vdbeExecBtreeMaskTest(pVdbe, pOp->p2) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             If pOp->p3 > 0 AndAlso pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p3 > 0 AndAlso _
                (pVdbe->aMem[pOp->p3].flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim changeCount As sqlite3_int64 = 0
             Dim pBtree As Btree Ptr = CPtr( _
                 Btree Ptr, pVdbe->db->aDb(pOp->p2).pBt)
             Dim rc As SQLITE_C_INT = sqlite3BtreeClearTable( _
                 pBtree, pOp->p1, @changeCount)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             If pOp->p3 <> 0 Then
                 If sqlite3AddInt64(@pVdbe->nChange, changeCount) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 pVdbe->vdbeFlags Or= VDBE_CHANGECOUNT_MASK
                 If pOp->p3 > 0 Then
                     Dim pCounter As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
                     If sqlite3AddInt64(@pCounter->u.i, changeCount) <> 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 End If
             End If
             If pVdbe->apCsr <> 0 Then
@@ -3919,17 +3940,17 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                (pOp->opcode = OP_NotExists AndAlso pOp->p2 = 0) OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable = 0 OrElse _
                pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pInput As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
             Dim rowId As sqlite3_int64 = 0
             If (pInput->flags And (MEM_INT Or MEM_INTREAL)) <> 0 Then
                 If pOp->opcode = OP_NotExists AndAlso (pInput->flags And MEM_INT) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 rowId = pInput->u.i
             Else
                 Dim keyCopy As SqliteVdbeMem
@@ -3960,7 +3981,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim seekResult As SQLITE_C_INT = 0
             Dim seekRc As SQLITE_C_INT = sqlite3BtreeTableMoveto( _
                 pCursor->uc.pCursor, rowId, 0, @seekResult)
-            If seekRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, seekRc)
+            If seekRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, seekRc)
             pCursor->movetoTarget = rowId
             pCursor->nullRow = 0
             pCursor->cacheStatus = CACHE_STALE
@@ -3968,7 +3989,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             pCursor->seekResult = seekResult
             If seekResult <> 0 Then
                 If pOp->opcode = OP_SeekRowid AndAlso pOp->p2 = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 nextCounter = pOp->p2
             End If
 
@@ -3980,12 +4001,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pOp->p4type <> P4_NOTUSED) OrElse _
                pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             ' A prior OR branch may leave a deferred position on this cursor.
             pCursor->nullRow = 0
             pCursor->deferredMoveto = 0
@@ -3997,7 +4018,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                    pCursor->pKeyInfo = 0 OrElse fieldCount > _
                        CPtr(sqlite3VdbeKeyInfoPrefix Ptr, _
                            pCursor->pKeyInfo)->nAllField Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
                 Dim unpacked As sqlite3VdbeUnpackedRecord
                 unpacked.pKeyInfo = pCursor->pKeyInfo
@@ -4017,7 +4038,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Dim indexResult As SQLITE_C_INT = 0
                 Dim indexRc As SQLITE_C_INT = sqlite3BtreeIndexMoveto( _
                     pCursor->uc.pCursor, @unpacked, @indexResult)
-                If indexRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, indexRc)
+                If indexRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, indexRc)
 
 #ifdef SQLITE_DEBUG
                 pCursor->seekOp = pOp->opcode
@@ -4053,12 +4074,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         indexResult = sqlite3BtreeEof(pCursor->uc.pCursor)
                     End If
                 End If
-                If indexRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, indexRc)
+                If indexRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, indexRc)
                 pCursor->seekResult = indexResult
                 If indexResult <> 0 Then nextCounter = pOp->p2
             Else
                 If pOp->p4.i <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim keyCopy As SqliteVdbeMem
             sqlite3VdbeMemInit(@keyCopy, pVdbe->db, MEM_NULL)
@@ -4069,7 +4090,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 sqlite3ApplyNumericAffinity(@keyCopy, 0)
             If pVdbe->db->mallocFailed <> 0 Then
                 sqlite3VdbeMemRelease(@keyCopy)
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             End If
 
             Dim effectiveOpcode As UByte = pOp->opcode
@@ -4152,7 +4173,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 End If
             End If
             sqlite3VdbeMemRelease(@keyCopy)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 #ifdef SQLITE_TEST
             If shouldCountSearch <> 0 Then sqlite3_search_count += 1
@@ -4162,11 +4183,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_SORTER Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim rc As SQLITE_C_INT = sqlite3VdbeSorterNext(pVdbe->db, pCursor)
             pCursor->cacheStatus = CACHE_STALE
             If rc = SQLITE_OK Then
@@ -4180,13 +4201,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ElseIf rc = SQLITE_DONE Then
                 pCursor->nullRow = 1
             Else
-                Return sqlite3VdbeExecError(pVdbe, rc)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 
         Case OP_ResetSorter
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType = CURTYPE_SORTER Then
@@ -4197,9 +4218,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Dim clearCode As SQLITE_C_INT = _
                     sqlite3BtreeClearTableOfCursor(pCursor->uc.pCursor)
                 If clearCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, clearCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, clearCode)
             Else
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             ' OP_SequenceTest tracks the cursor lifetime, not its current rows.
             pCursor->nullRow = 1
@@ -4208,35 +4229,35 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_RowSetAdd
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRowSetMem As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             Dim pRowIdMem As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             If (pRowIdMem->flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pRowSetMem->flags And MEM_BLOB) <> 0 Then
                 If vdbeExecMemIsRowSet(pRowSetMem) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Else
                 Dim rowSetCode As SQLITE_C_INT = _
                     sqlite3VdbeMemSetRowSet(pRowSetMem)
                 If rowSetCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, rowSetCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowSetCode)
             End If
             sqlite3RowSetInsert(pRowSetMem->z, pRowIdMem->u.i)
             If pVdbe->db->mallocFailed <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
         Case OP_RowSetRead
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRowSetMem As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             Dim nextRowId As sqlite3_int64 = 0
             Dim hasNextRow As SQLITE_C_INT = 0
             If (pRowSetMem->flags And MEM_BLOB) <> 0 Then
                 If vdbeExecMemIsRowSet(pRowSetMem) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 hasNextRow = sqlite3RowSetNext(pRowSetMem->z, @nextRowId)
             End If
             If hasNextRow = 0 Then
@@ -4251,19 +4272,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p4type <> P4_INT32 OrElse pOp->p4.i < -1 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRowSetMem As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             Dim pRowIdMem As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
             If (pRowIdMem->flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pRowSetMem->flags And MEM_BLOB) <> 0 Then
                 If vdbeExecMemIsRowSet(pRowSetMem) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Else
                 Dim rowSetCode As SQLITE_C_INT = _
                     sqlite3VdbeMemSetRowSet(pRowSetMem)
                 If rowSetCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, rowSetCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowSetCode)
             End If
             If pOp->p4.i <> 0 Then
                 If sqlite3RowSetTest( _
@@ -4273,25 +4294,25 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p4.i >= 0 Then
                 sqlite3RowSetInsert(pRowSetMem->z, pRowIdMem->u.i)
                 If pVdbe->db->mallocFailed <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             End If
 
         Case OP_FilterAdd, OP_Filter
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p3 <= 0 OrElse pOp->p4type <> P4_INT32 OrElse _
                pOp->p4.i <= 0 OrElse pOp->p3 > pVdbe->nMem - pOp->p4.i Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->opcode = OP_Filter AndAlso _
                (pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nOp) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pBloomFilter As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pBloomFilter->flags And MEM_BLOB) = 0 OrElse _
                pBloomFilter->n <= 0 OrElse pBloomFilter->z = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim filterBitCount As sqlite3_uint64 = _
                 CULngInt(pBloomFilter->n) * 8ULL
             If filterBitCount = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim filterHashValue As sqlite3_uint64 = _
                 sqlite3VdbeFilterHash(pVdbe->aMem, pOp) Mod filterBitCount
             Dim filterByteIndex As LongInt = CLngInt(filterHashValue Shr 3)
@@ -4310,12 +4331,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->deferredMoveto <> 0 OrElse pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim rc As SQLITE_C_INT = sqlite3BtreeNext(pCursor->uc.pCursor, pOp->p3)
             pCursor->cacheStatus = CACHE_STALE
             If rc = SQLITE_OK Then
@@ -4329,7 +4350,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ElseIf rc = SQLITE_DONE Then
                 pCursor->nullRow = 1
             Else
-                Return sqlite3VdbeExecError(pVdbe, rc)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 
         Case OP_Prev
@@ -4337,12 +4358,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pOp->p3 < 0 OrElse pOp->p3 > 1 OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->deferredMoveto <> 0 OrElse pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim rc As SQLITE_C_INT = sqlite3BtreePrevious(pCursor->uc.pCursor, pOp->p3)
             pCursor->cacheStatus = CACHE_STALE
             If rc = SQLITE_OK Then
@@ -4356,7 +4377,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ElseIf rc = SQLITE_DONE Then
                 pCursor->nullRow = 1
             Else
-                Return sqlite3VdbeExecError(pVdbe, rc)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 
 #ifndef SQLITE_OMIT_VIRTUALTABLE
@@ -4368,19 +4389,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVfilterCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pVfilterCursor->eCurType <> CURTYPE_VTAB OrElse _
                pVfilterCursor->uc.pVtabCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVtabCursor As SqliteVtabCursor Ptr = _
                 CPtr(SqliteVtabCursor Ptr, pVfilterCursor->uc.pVtabCursor)
             If pVtabCursor->pVtab = 0 OrElse _
                pVtabCursor->pVtab->pModule = 0 OrElse _
                pVtabCursor->pVtab->pModule->xFilter = 0 OrElse _
                pVtabCursor->pVtab->pModule->xEof = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pQueryPlan As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
             Dim pArgumentCount As SqliteVdbeMem Ptr = _
@@ -4390,11 +4411,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pArgumentCount->u.i < 0 OrElse _
                pArgumentCount->u.i > pVdbe->nArg OrElse _
                pArgumentCount->u.i > pVdbe->nMem - pOp->p3 - 2 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim filterArgumentCount As SQLITE_C_INT = _
                 CInt(pArgumentCount->u.i)
             If filterArgumentCount > 0 AndAlso pVdbe->apArg = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             For iArgument As SQLITE_C_INT = 0 To filterArgumentCount - 1
                 pVdbe->apArg[iArgument] = _
                     @pVdbe->aMem[pOp->p3 + 2 + iArgument]
@@ -4406,7 +4427,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 filterArgumentCount, pVdbe->apArg)
             sqlite3VtabImportErrmsg(pVdbe, pVtabCursor->pVtab)
             If filterCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, filterCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, filterCode)
             Dim xEof As SqliteVdbeVtabEofProc = CPtr( _
                 SqliteVdbeVtabEofProc, pVtabCursor->pVtab->pModule->xEof)
             Dim filterIsEmpty As SQLITE_C_INT = xEof(pVtabCursor)
@@ -4417,25 +4438,25 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVnextCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pVnextCursor->nullRow <> 0 Then Exit Select
             If pVnextCursor->eCurType <> CURTYPE_VTAB OrElse _
                pVnextCursor->uc.pVtabCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVnext As SqliteVtabCursor Ptr = _
                 CPtr(SqliteVtabCursor Ptr, pVnextCursor->uc.pVtabCursor)
             If pVnext->pVtab = 0 OrElse pVnext->pVtab->pModule = 0 OrElse _
                pVnext->pVtab->pModule->xNext = 0 OrElse _
                pVnext->pVtab->pModule->xEof = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim xNext As SqliteVdbeVtabNextProc = CPtr( _
                 SqliteVdbeVtabNextProc, pVnext->pVtab->pModule->xNext)
             Dim nextCode As SQLITE_C_INT = xNext(pVnext)
             sqlite3VtabImportErrmsg(pVdbe, pVnext->pVtab)
             If nextCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, nextCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, nextCode)
             Dim xVtabEof As SqliteVdbeVtabEofProc = CPtr( _
                 SqliteVdbeVtabEofProc, pVnext->pVtab->pModule->xEof)
             If xVtabEof(pVnext) = 0 Then nextCounter = pOp->p2
@@ -4446,17 +4467,17 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p2 = pOp->p3 OrElse pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 OrElse pVdbe->aMem = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pValueListCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pValueListCursor->eCurType <> CURTYPE_BTREE OrElse _
                pValueListCursor->uc.pCursor = 0 OrElse _
                (pVdbe->aMem[pOp->p2].flags And MEM_AGG) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pValueList As SqliteValueList Ptr = CPtr( _
                 SqliteValueList Ptr, sqlite3Malloc(SizeOf(SqliteValueList)))
             If pValueList = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             pValueList->pCsr = pValueListCursor->uc.pCursor
             pValueList->pOut = @pVdbe->aMem[pOp->p3]
             sqlite3VdbeMemSetPointer( _
@@ -4467,14 +4488,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->db->nDb OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p4type <> P4_TABLEREF OrElse pOp->p4.p = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCheckedTable As SqliteTable Ptr = _
                 CPtr(SqliteTable Ptr, pOp->p4.p)
             sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
             If pCheckedTable->nTabRef = 0 OrElse _
                pCheckedTable->eTabType <> TABTYP_VTAB OrElse _
                pCheckedTable->zName = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCheckedVtable As SqliteVTable Ptr = pCheckedTable->u.vtab.p
             If pCheckedVtable <> 0 Then
                 If pCheckedVtable->pVtab = 0 OrElse _
@@ -4482,7 +4503,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                    pCheckedVtable->pVtab->pModule->iVersion < 4 OrElse _
                    pCheckedVtable->pVtab->pModule->xIntegrity = 0 OrElse _
                    pVdbe->db->aDb(pOp->p1).zDbSName = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim zIntegrityError As ZString Ptr = 0
                 sqlite3VtabLock(pCheckedVtable)
                 Dim xIntegrity As SqliteVdbeVtabIntegrityProc = CPtr( _
@@ -4495,19 +4516,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If integrityCode <> SQLITE_OK Then
                     If zIntegrityError <> 0 Then _
                         sqlite3VdbeExecFree(zIntegrityError)
-                    Return sqlite3VdbeExecError(pVdbe, integrityCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, integrityCode)
                 End If
                 If zIntegrityError <> 0 Then
                     Dim integrityTextCode As SQLITE_C_INT = sqlite3VdbeMemSetStr( _
                         @pVdbe->aMem[pOp->p2], zIntegrityError, -1, _
                         SQLITE_UTF8, @sqlite3VdbeExecFree)
                     If integrityTextCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, integrityTextCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, integrityTextCode)
                     Dim integrityEncodingCode As SQLITE_C_INT = _
                         sqlite3VdbeChangeEncoding( _
                             @pVdbe->aMem[pOp->p2], pVdbe->db->enc)
                     If integrityEncodingCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, integrityEncodingCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, integrityEncodingCode)
                 End If
             End If
 #endif
@@ -4516,7 +4537,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->nullRow <> 0 Then
@@ -4524,36 +4545,36 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ElseIf pCursor->deferredMoveto <> 0 Then
                 If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                    pCursor->isTable = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 sqlite3VdbeMemSetInt64( _
                     @pVdbe->aMem[pOp->p2], pCursor->movetoTarget)
 #ifndef SQLITE_OMIT_VIRTUALTABLE
             ElseIf pCursor->eCurType = CURTYPE_VTAB Then
                 If pCursor->uc.pVtabCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim pVrowCursor As SqliteVtabCursor Ptr = _
                     CPtr(SqliteVtabCursor Ptr, pCursor->uc.pVtabCursor)
                 If pVrowCursor->pVtab = 0 OrElse _
                    pVrowCursor->pVtab->pModule = 0 OrElse _
                    pVrowCursor->pVtab->pModule->xRowid = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim rowId As sqlite3_int64 = 0
                 Dim xRowid As SqliteVdbeVtabRowidProc = CPtr( _
                     SqliteVdbeVtabRowidProc, pVrowCursor->pVtab->pModule->xRowid)
                 Dim rowidCode As SQLITE_C_INT = xRowid(pVrowCursor, @rowId)
                 sqlite3VtabImportErrmsg(pVdbe, pVrowCursor->pVtab)
                 If rowidCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, rowidCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowidCode)
                 sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], rowId)
 #endif
             Else
                 If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable = 0 OrElse _
                    pCursor->uc.pCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim restoreResult As SQLITE_C_INT = 0
                 Dim rc As SQLITE_C_INT = sqlite3BtreeCursorRestore( _
                     pCursor->uc.pCursor, @restoreResult)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 If sqlite3BtreeEof(pCursor->uc.pCursor) <> 0 Then
                     sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
                 Else
@@ -4567,39 +4588,39 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                (pOp->p3 <> 0 AndAlso pOp->p3 <> 1) OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->nullRow <> 0 OrElse pCursor->deferredMoveto <> 0 OrElse _
                pCursor->uc.pCursor = 0 OrElse _
                sqlite3BtreeCursorIsValidNN(pCursor->uc.pCursor) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim payloadSize As u32 = sqlite3BtreePayloadSize(pCursor->uc.pCursor)
             If CULngInt(payloadSize) > CULngInt(pVdbe->db->lengthLimit) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             Dim pOutput As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             sqlite3VdbeMemSetNull(pOutput)
             Dim rowDataCode As SQLITE_C_INT = sqlite3VdbeMemFromBtreeZeroOffset( _
                 pCursor->uc.pCursor, payloadSize, pOutput)
             If rowDataCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, rowDataCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowDataCode)
             If pOp->p3 = 0 Then
                 rowDataCode = sqlite3VdbeMemMakeWriteable(pOutput)
                 If rowDataCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, rowDataCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowDataCode)
             End If
 
         Case OP_NewRowid
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable = 0 OrElse _
                pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 #ifdef SQLITE_32BIT_ROWID
             Dim maximumRowId As sqlite3_int64 = &H7FFFFFFF
 #else
@@ -4610,7 +4631,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim rc As SQLITE_C_INT = SQLITE_OK
             If (pCursor->cursorFlags And VDBE_CURSOR_RANDOM_ROWID) = 0 Then
                 rc = sqlite3BtreeLast(pCursor->uc.pCursor, @isEmpty)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 If isEmpty <> 0 Then
                     rowId = 1
                 Else
@@ -4625,7 +4646,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
             If pOp->p3 <> 0 Then
                 If pOp->p3 < 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim pSequence As SqliteVdbeMem Ptr = 0
                 ' Trigger programs keep AUTOINCREMENT state in the root VM's
                 ' registers, so P3 must resolve through the outermost frame.
@@ -4638,28 +4659,28 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     Wend
                     If pOp->p3 > pRootFrame->nMem OrElse _
                        pRootFrame->aMem = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     pSequence = @pRootFrame->aMem[pOp->p3]
                 Else
                     Dim sequenceRegisterLimit As LongInt = _
                         CLngInt(pVdbe->nMem) + 1 - CLngInt(pVdbe->nCursor)
                     If pVdbe->aMem = 0 OrElse _
                        pOp->p3 > sequenceRegisterLimit Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     pSequence = @pVdbe->aMem[pOp->p3]
                 End If
                 If (pCursor->cursorFlags And VDBE_CURSOR_RANDOM_ROWID) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 If sqlite3VdbeMemIntegerify(pSequence) <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pSequence->u.i = maximumRowId Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 If rowId < pSequence->u.i + 1 Then rowId = pSequence->u.i + 1
                 pSequence->u.i = rowId
             End If
 
             If (pCursor->cursorFlags And VDBE_CURSOR_RANDOM_ROWID) <> 0 Then
-                If pOp->p3 <> 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                If pOp->p3 <> 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
                 Dim foundUnused As SQLITE_C_INT = 0
                 For attempt As SQLITE_C_INT = 0 To 99
                     Dim randomValue As sqlite3_int64 = 0
@@ -4670,13 +4691,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     Dim seekResult As SQLITE_C_INT = 0
                     rc = sqlite3BtreeTableMoveto( _
                         pCursor->uc.pCursor, rowId, 0, @seekResult)
-                    If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                    If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                     If seekResult <> 0 Then
                         foundUnused = 1
                         Exit For
                     End If
                 Next
-                If foundUnused = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                If foundUnused = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
             End If
 
             pCursor->deferredMoveto = 0
@@ -4694,11 +4715,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pOp->p5 <> OE_FAIL AndAlso pOp->p5 <> OE_ROLLBACK AndAlso _
                 pOp->p5 <> OE_ABORT AndAlso pOp->p5 <> OE_IGNORE AndAlso _
                 pOp->p5 <> OE_REPLACE) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->vdbeFlags And VDBE_READONLY_MASK) <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
             If pVdbe->db->mallocFailed <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
             Dim pUpdateTable As SqliteVTable Ptr = _
                 CPtr(SqliteVTable Ptr, pOp->p4.p)
@@ -4706,9 +4727,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             ' still retains its VTable wrapper. SQLite reports this as locked.
             If pUpdateTable->pVtab = 0 OrElse _
                pUpdateTable->pVtab->pModule = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_LOCKED)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_LOCKED)
             If pUpdateTable->pVtab->pModule->xUpdate = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_READONLY)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_READONLY)
 
 #ifdef SQLITE_DEBUG
             sqlite3VdbeIncrWriteCounter(pVdbe, 0)
@@ -4728,7 +4749,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If updateCode = SQLITE_OK AndAlso pOp->p1 <> 0 Then
                 If pOp->p2 <= 1 OrElse _
                    (pVdbe->aMem[pOp->p3].flags And MEM_NULL) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pVdbe->db->lastRowid = newRowid
             End If
             If (updateCode And &HFF) = SQLITE_CONSTRAINT AndAlso _
@@ -4744,7 +4765,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pVdbe->nChange += 1
             End If
             If updateCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, updateCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, updateCode)
 #endif
 
         Case OP_RowCell
@@ -4755,16 +4776,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 >= pVdbe->nMem OrElse pOp->p4type <> P4_NOTUSED OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 OrElse _
                pVdbe->apCsr[pOp->p2] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRowCellInsert As SqliteVdbeOp Ptr = _
                 @pVdbe->aOp[programCounter + 1]
             If (pRowCellInsert->p5 And OPFLAG_PREFORMAT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pRowCellInsert->opcode = OP_Insert AndAlso pOp->p3 <= 0) OrElse _
                (pRowCellInsert->opcode = OP_IdxInsert AndAlso pOp->p3 <> 0) OrElse _
                (pRowCellInsert->opcode <> OP_Insert AndAlso _
                 pRowCellInsert->opcode <> OP_IdxInsert) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRowCellDestination As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim pRowCellSource As SqliteVdbeCursor Ptr = _
@@ -4778,24 +4799,24 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pRowCellDestination->isTable = 0) OrElse _
                (pRowCellInsert->opcode = OP_IdxInsert AndAlso _
                 pRowCellDestination->isTable <> 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p3 <> 0 AndAlso _
                (pVdbe->aMem[pOp->p3].flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim rowCellKey As sqlite3_int64 = 0
             If pOp->p3 <> 0 Then rowCellKey = pVdbe->aMem[pOp->p3].u.i
             Dim rowCellCode As SQLITE_C_INT = sqlite3BtreeTransferRow( _
                 pRowCellDestination->uc.pCursor, _
                 pRowCellSource->uc.pCursor, rowCellKey)
             If rowCellCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, rowCellCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rowCellCode)
 
         Case OP_Insert
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim pData As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
@@ -4803,26 +4824,26 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->uc.pCursor = 0 OrElse (pKey->flags And MEM_INT) = 0 OrElse _
                ((pData->flags And (MEM_BLOB Or MEM_STR)) = 0 AndAlso pData->n <> 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pCursor->isTable = 0 Then
                 If (pOp->p5 And OPFLAG_ISNOOP) = 0 OrElse _
                    pOp->p4type <> P4_TABLE OrElse pOp->p4.p = 0 OrElse _
                    (CPtr(SqliteVdbeHookTable Ptr, pOp->p4.p)->tabFlags And _
                     TF_WithoutRowid) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             Dim pHookTable As SqliteVdbeHookTable Ptr = 0
             Dim zHookDatabase As Const ZString Ptr = 0
             Dim hookContextCode As SQLITE_C_INT = _
                 vdbeUpdateHookContext(pVdbe, pCursor, pOp, pHookTable, zHookDatabase)
             If hookContextCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, hookContextCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, hookContextCode)
             Dim nZero As SQLITE_C_INT = 0
             If (pData->flags And MEM_ZERO) <> 0 Then nZero = pData->u.nZero
             If pData->n < 0 OrElse nZero < 0 OrElse _
                CULngInt(pData->n) + CULngInt(nZero) > _
                    CULngInt(pVdbe->db->lengthLimit) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
 
             Dim payload As SqliteBtreePayload
             payload.pKey = 0
@@ -4859,7 +4880,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim insertRc As SQLITE_C_INT = sqlite3BtreeInsert(pCursor->uc.pCursor, @payload, _
                 pOp->p5 And (OPFLAG_APPEND Or OPFLAG_SAVEPOSITION Or OPFLAG_PREFORMAT), _
                 seekResult)
-            If insertRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, insertRc)
+            If insertRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, insertRc)
             pCursor->deferredMoveto = 0
             pCursor->cacheStatus = CACHE_STALE
             pCursor->seekResult = 0
@@ -4873,18 +4894,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_Delete
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                pCursor->uc.pCursor = 0 OrElse pCursor->deferredMoveto <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pHookTable As SqliteVdbeHookTable Ptr = 0
             Dim zHookDatabase As Const ZString Ptr = 0
             Dim hookContextCode As SQLITE_C_INT = _
                 vdbeUpdateHookContext(pVdbe, pCursor, pOp, pHookTable, zHookDatabase)
             If hookContextCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, hookContextCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, hookContextCode)
             If pCursor->isTable <> 0 AndAlso pHookTable <> 0 AndAlso _
                (pOp->p5 And OPFLAG_SAVEPOSITION) <> 0 Then _
                 pCursor->movetoTarget = sqlite3BtreeIntegerKey(pCursor->uc.pCursor)
@@ -4907,7 +4928,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 #endif
             Dim deleteRc As SQLITE_C_INT = sqlite3BtreeDelete(pCursor->uc.pCursor, _
                 pOp->p5 And (OPFLAG_SAVEPOSITION Or BTREE_AUXDELETE))
-            If deleteRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, deleteRc)
+            If deleteRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, deleteRc)
             If (pOp->p2 And OPFLAG_NCHANGE) <> 0 Then
                 pVdbe->nChange += 1
                 pVdbe->vdbeFlags Or= VDBE_CHANGECOUNT_MASK
@@ -4925,7 +4946,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 >= pVdbe->nMem OrElse _
                (pOp->p5 <> 0 AndAlso pOp->p5 <> OPFLAG_NOCHNG) OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVcolumnCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim pDestination As SqliteVdbeMem Ptr = _
@@ -4938,13 +4959,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Else
                 If pVcolumnCursor->eCurType <> CURTYPE_VTAB OrElse _
                    pVcolumnCursor->uc.pVtabCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim pVtabCursor As SqliteVtabCursor Ptr = _
                     CPtr(SqliteVtabCursor Ptr, pVcolumnCursor->uc.pVtabCursor)
                 If pVtabCursor->pVtab = 0 OrElse _
                    pVtabCursor->pVtab->pModule = 0 OrElse _
                    pVtabCursor->pVtab->pModule->xColumn = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
                 Dim nullFunction As SqliteFuncDef = Type<SqliteFuncDef>(0)
                 nullFunction.funcFlags = SQLITE_RESULT_SUBTYPE
@@ -4979,13 +5000,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     columnCode = columnContext.isError
                 End If
                 If columnCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, columnCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, columnCode)
                 Dim encodingCode As SQLITE_C_INT = sqlite3VdbeChangeEncoding( _
                     pDestination, pVdbe->db->enc)
                 If encodingCode <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, encodingCode)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, encodingCode)
                 If pVdbe->db->mallocFailed <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
             End If
 #endif
 
@@ -4994,11 +5015,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p2 < 0 OrElse pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pColumnDefault As SqliteVdbeMem Ptr = 0
             If pOp->p4type = P4_MEM Then
                 If pOp->p4.p = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pColumnDefault = CPtr(SqliteVdbeMem Ptr, pOp->p4.p)
             End If
             Dim pCursor As SqliteVdbeCursor Ptr = _
@@ -5014,10 +5035,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         ' OP_Init.P3 routes malformed records to the integrity-check result.
                         nextCounter = corruptTarget
                     Else
-                        Return sqlite3VdbeExecError(pVdbe, rc)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                     End If
                 Else
-                    Return sqlite3VdbeExecError(pVdbe, rc)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 End If
             End If
 
@@ -5026,7 +5047,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pOffsetCursor As SqliteVdbeCursor Ptr = 0
             If pVdbe->apCsr[pOp->p1] <> 0 Then _
                 pOffsetCursor = CPtr( _
@@ -5036,12 +5057,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p3])
             Else
                 If pOffsetCursor->uc.pCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pOffsetCursor->deferredMoveto <> 0 Then
                     Dim offsetSeekCode As SQLITE_C_INT = _
                         sqlite3VdbeExecFinishSeek(pOffsetCursor)
                     If offsetSeekCode <> SQLITE_OK Then _
-                        Return sqlite3VdbeExecError(pVdbe, offsetSeekCode)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, offsetSeekCode)
                 End If
                 If sqlite3BtreeEof(pOffsetCursor->uc.pCursor) <> 0 Then
                     sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p3])
@@ -5059,19 +5080,19 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 > pVdbe->nMem - pOp->p1 OrElse _
                (pOp->p4type <> P4_STATIC AndAlso pOp->p4type <> P4_DYNAMIC) OrElse _
                pOp->p4.z = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             For iField As SQLITE_C_INT = 0 To pOp->p2 - 1
                 Dim affinity As UByte = CPtr(Const UByte Ptr, pOp->p4.z)[iField]
                 If (affinity < SQLITE_AFF_NONE OrElse affinity > SQLITE_AFF_FLEXNUM) AndAlso _
                    affinity <> SQLITE_AFF_DEFER Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 sqlite3ValueApplyAffinity( _
                     @pVdbe->aMem[pOp->p1 + iField], affinity, pVdbe->db->enc)
                 If affinity = SQLITE_AFF_REAL AndAlso _
                    (pVdbe->aMem[pOp->p1 + iField].flags And MEM_INT) <> 0 Then
                     Dim rc As SQLITE_C_INT = sqlite3VdbeMemRealify( _
                         @pVdbe->aMem[pOp->p1 + iField])
-                    If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                    If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 End If
             Next
 
@@ -5079,43 +5100,43 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim typeCheckCode As SQLITE_C_INT = _
                 sqlite3VdbeExecTypeCheck(pVdbe, pOp)
             If typeCheckCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, typeCheckCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, typeCheckCode)
 
         Case OP_RealAffinity
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p1].flags And (MEM_INT Or MEM_INTREAL)) <> 0 Then
                 Dim rc As SQLITE_C_INT = sqlite3VdbeMemRealify(@pVdbe->aMem[pOp->p1])
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 
         Case OP_Cast
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 < SQLITE_AFF_BLOB OrElse pOp->p2 > SQLITE_AFF_REAL Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim castRc As SQLITE_C_INT = sqlite3VdbeMemExpandBlob( _
                 @pVdbe->aMem[pOp->p1])
             If castRc = SQLITE_OK Then castRc = sqlite3VdbeMemCast( _
                 @pVdbe->aMem[pOp->p1], CByte(pOp->p2), pVdbe->db->enc)
-            If castRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, castRc)
+            If castRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, castRc)
 
         Case OP_SoftNull
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pVdbe->aMem[pOp->p1].flags = _
                 (pVdbe->aMem[pOp->p1].flags And _
                  Not (MEM_UNDEFINED Or MEM_AFF_MASK)) Or MEM_NULL
 
         Case OP_ClrSubtype
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             pVdbe->aMem[pOp->p1].flags = _
                 pVdbe->aMem[pOp->p1].flags And Not MEM_SUBTYPE
 
         Case OP_GetSubtype
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p1].flags And MEM_SUBTYPE) <> 0 Then
                 sqlite3VdbeMemSetInt64( _
                     @pVdbe->aMem[pOp->p2], pVdbe->aMem[pOp->p1].eSubtype)
@@ -5126,7 +5147,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_SetSubtype
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p1].flags And MEM_NULL) <> 0 Then
                 pVdbe->aMem[pOp->p2].flags = _
                     pVdbe->aMem[pOp->p2].flags And Not MEM_SUBTYPE
@@ -5135,7 +5156,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 pVdbe->aMem[pOp->p2].eSubtype = _
                     CByte(CULngInt(pVdbe->aMem[pOp->p1].u.i) And &HFFULL)
             Else
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_MISMATCH)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISMATCH)
             End If
 
         Case OP_MakeRecord
@@ -5144,10 +5165,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 > pVdbe->nMem - pOp->p1 OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                (pOp->p3 >= pOp->p1 AndAlso pOp->p3 < pOp->p1 + pOp->p2) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p4type <> P4_NOTUSED AndAlso _
                pOp->p4type <> P4_STATIC AndAlso pOp->p4type <> P4_DYNAMIC Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p4.p <> 0 Then
                 Dim pAffinity As Const UByte Ptr = CPtr(Const UByte Ptr, pOp->p4.p)
                 For iField As SQLITE_C_INT = 0 To pOp->p2 - 1
@@ -5164,7 +5185,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim rc As SQLITE_C_INT = sqlite3VdbeRecordPack( _
                 pVdbe->db, @pVdbe->aMem[pOp->p3], @pVdbe->aMem[pOp->p1], _
                 pOp->p2, pVdbe->minWriteFileFormat)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
 
         Case OP_IfNoHope, OP_Found, OP_NotFound, OP_NoConflict
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
@@ -5172,12 +5193,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p4type <> P4_INT32 OrElse pOp->p4.i < 0 OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable <> 0 OrElse _
                pCursor->uc.pCursor = 0 OrElse pCursor->pKeyInfo = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             ' A prior seek already established this prefix, so skip the fallback lookup.
             If pOp->opcode = OP_IfNoHope AndAlso _
                pCursor->seekHit >= pOp->p4.i Then Exit Select
@@ -5201,7 +5222,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If keyFieldCount > pVdbe->nMem - pOp->p3 OrElse _
                    keyFieldCount > CPtr(sqlite3VdbeKeyInfoPrefix Ptr, _
                        pCursor->pKeyInfo)->nAllField Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pUnpacked.aMem = @pVdbe->aMem[pOp->p3]
                 pUnpacked.n = 0
                 pUnpacked.nField = CUShort(keyFieldCount)
@@ -5214,24 +5235,24 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Dim pRecordValue As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
                 If (pRecordValue->flags And MEM_BLOB) = 0 OrElse _
                    pRecordValue->n <= 0 OrElse pRecordValue->z = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pOp->opcode = OP_NoConflict Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim expandRc As SQLITE_C_INT = sqlite3VdbeMemExpandBlob(pRecordValue)
-                If expandRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, expandRc)
+                If expandRc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, expandRc)
                 ' RecordUnpack reserves one extra slot for an implicit rowid.
                 Dim fieldCapacity As SQLITE_C_INT = _
                     CInt(CPtr(sqlite3VdbeKeyInfoPrefix Ptr, _
                         pCursor->pKeyInfo)->nKeyField) + 1
                 If fieldCapacity <= 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim memoryBytes As sqlite3_uint64 = _
                     CULngInt(fieldCapacity) * SizeOf(SqliteVdbeMem)
                 If memoryBytes > SQLITE_MAX_ALLOCATION_SIZE Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
                 Dim pFields As SqliteVdbeMem Ptr = CPtr(SqliteVdbeMem Ptr, _
                     sqlite3DbMallocZero(pVdbe->db, memoryBytes))
-                If pFields = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                If pFields = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
                 pUnpacked.aMem = pFields
                 pUnpacked.n = 0
                 pUnpacked.nField = CUShort(fieldCapacity)
@@ -5250,7 +5271,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Next
                 sqlite3DbFree(pVdbe->db, pFields)
             End If
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
 
             Dim alreadyExists As SQLITE_C_INT = IIf(result = 0, 1, 0)
             pCursor->nullRow = IIf(alreadyExists <> 0, 0, 1)
@@ -5270,7 +5291,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p4type <> P4_INDEX OrElse _
                pOp->p4.p = 0 OrElse pVdbe->apCsr = 0 OrElse _
                pVdbe->apCsr[pOp->p1] = 0 OrElse programCounter <= 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pPriorFound As SqliteVdbeOp Ptr = _
                 @pVdbe->aOp[programCounter - 1]
             If pPriorFound->opcode <> OP_Found OrElse _
@@ -5278,7 +5299,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pPriorFound->p1 <> pOp->p1 OrElse _
                pPriorFound->p3 <> pOp->p3 OrElse _
                pPriorFound->p4.i <= 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pIndexCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
@@ -5288,7 +5309,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pIndexCursor->uc.pCursor = 0 OrElse pIndexCursor->pKeyInfo = 0 OrElse _
                pIndex->nColumn = 0 OrElse _
                pIndex->nColumn > pVdbe->nMem - pOp->p3 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim unpackedKey As sqlite3VdbeUnpackedRecord
             unpackedKey.pKeyInfo = pIndexCursor->pKeyInfo
@@ -5318,7 +5339,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 < 0 OrElse pOp->p4.i < 0 OrElse _
                pOp->p4.i > &HFFFF OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim pRecord As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
@@ -5326,7 +5347,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p4type = P4_INT32 Then
                 fieldCount = pOp->p4.i
             ElseIf pOp->p4type <> P4_NOTUSED OrElse pOp->p3 <> 0 Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             Dim preformattedIndexInsert As SQLITE_C_INT = CInt( _
                 (pOp->p5 And OPFLAG_PREFORMAT) <> 0)
@@ -5335,25 +5356,25 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                ((pRecord->flags And MEM_BLOB) = 0 AndAlso _
                 preformattedIndexInsert = 0) OrElse pRecord->n < 0 OrElse _
                (pRecord->n = 0 AndAlso preformattedIndexInsert = 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim zeroBytes As SQLITE_C_INT = 0
             If (pRecord->flags And MEM_ZERO) <> 0 Then zeroBytes = pRecord->u.nZero
             If zeroBytes < 0 OrElse pRecord->n > pVdbe->db->lengthLimit OrElse _
                zeroBytes > pVdbe->db->lengthLimit - pRecord->n Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             If fieldCount > 0 Then
                 If pOp->p3 <= 0 OrElse pOp->p3 > pVdbe->nMem - fieldCount OrElse _
                    pCursor->pKeyInfo = 0 OrElse fieldCount > _
                        CPtr(sqlite3VdbeKeyInfoPrefix Ptr, pCursor->pKeyInfo)->nAllField Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             ElseIf pOp->p3 <> 0 Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
             Dim rc As SQLITE_C_INT = sqlite3VdbeMemExpandBlob(pRecord)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             If (pRecord->n = 0 AndAlso preformattedIndexInsert = 0) OrElse _
                pRecord->n > pVdbe->db->lengthLimit Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             Dim payload As SqliteBtreePayload
             payload.pKey = pRecord->z
             payload.nKey = pRecord->n
@@ -5373,7 +5394,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             rc = sqlite3BtreeInsert(pCursor->uc.pCursor, @payload, _
                 pOp->p5 And (OPFLAG_APPEND Or OPFLAG_SAVEPOSITION Or OPFLAG_PREFORMAT), _
                 seekResult)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             pCursor->deferredMoveto = 0
             pCursor->cacheStatus = CACHE_STALE
             pCursor->seekResult = 0
@@ -5384,14 +5405,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p5 > pVdbe->nMem - pOp->p2 OrElse _
                pOp->p3 < 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable <> 0 OrElse _
                pCursor->uc.pCursor = 0 OrElse pCursor->pKeyInfo = 0 OrElse _
                pOp->p5 > CPtr(sqlite3VdbeKeyInfoPrefix Ptr, _
                    pCursor->pKeyInfo)->nAllField Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim unpacked As sqlite3VdbeUnpackedRecord
             unpacked.pKeyInfo = pCursor->pKeyInfo
             unpacked.aMem = @pVdbe->aMem[pOp->p2]
@@ -5406,18 +5427,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim result As SQLITE_C_INT = 0
             Dim rc As SQLITE_C_INT = sqlite3BtreeIndexMoveto( _
                 pCursor->uc.pCursor, @unpacked, @result)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             If result <> 0 Then
                 Dim pIndex As SqliteIndex Ptr = _
                     CPtr(SqliteIndex Ptr, pOp->p4.p)
                 If pIndex = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT_INDEX)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT_INDEX)
                 rc = sqlite3VdbeFindIndexKey( _
                     pCursor->uc.pCursor, pIndex, @unpacked, @result, 0)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 If result <> 0 Then
                     If sqlite3WritableSchema(pVdbe->db) = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT_INDEX)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT_INDEX)
                     pCursor->cacheStatus = CACHE_STALE
                     pCursor->seekResult = 0
                     Exit Select
@@ -5428,14 +5449,14 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     @pVdbe->aMem[pOp->p3]
                 Dim sameIndexRecord As SQLITE_C_INT = vdbeIndexKeyCompare( _
                     pCursor->uc.pCursor, pNewIndexRecord, @rc)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 If sameIndexRecord <> 0 Then
                     sqlite3VdbeMemSetNull(pNewIndexRecord)
                     Exit Select
                 End If
             End If
             rc = sqlite3BtreeDelete(pCursor->uc.pCursor, BTREE_AUXDELETE)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             pCursor->deferredMoveto = 0
             pCursor->cacheStatus = CACHE_STALE
             pCursor->seekResult = 0
@@ -5444,13 +5465,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim comparison As SQLITE_C_INT = 0
             Dim rc As SQLITE_C_INT = sqlite3VdbeExecIndexCursorCompare( _
                 pVdbe, pCursor, pOp, comparison)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             Dim branchResult As SQLITE_C_INT
             If pOp->opcode = OP_IdxLE OrElse pOp->opcode = OP_IdxLT Then
                 branchResult = -comparison
@@ -5464,7 +5485,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 < 0 OrElse pOp->p3 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 OrElse _
                pVdbe->apCsr[pOp->p3] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pIndexCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             Dim pTableCursor As SqliteVdbeCursor Ptr = _
@@ -5474,16 +5495,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pIndexCursor->uc.pCursor = 0 OrElse _
                pTableCursor->eCurType <> CURTYPE_BTREE OrElse _
                pTableCursor->isTable = 0 OrElse pTableCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim restoreCode As SQLITE_C_INT = sqlite3VdbeCursorRestore(pIndexCursor)
-            If restoreCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, restoreCode)
+            If restoreCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, restoreCode)
             Dim rowId As sqlite3_int64 = 0
             If pOp->p4type <> P4_NOTUSED AndAlso pOp->p4type <> P4_INTARRAY Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pIndexCursor->nullRow = 0 Then
                 Dim rc As SQLITE_C_INT = sqlite3VdbeIdxRowid( _
                     pVdbe->db, pIndexCursor->uc.pCursor, @rowId)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 pTableCursor->nullRow = 0
                 pTableCursor->movetoTarget = rowId
                 pTableCursor->deferredMoveto = 1
@@ -5498,16 +5519,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_CursorHint
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor <> 0 Then
                 If pCursor->eCurType <> CURTYPE_BTREE OrElse _
                    pCursor->uc.pCursor = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pOp->p4type = P4_EXPR Then
                     If pOp->p4.p = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     sqlite3BtreeCursorHint( _
                         CPtr(BtCursor Ptr, pCursor->uc.pCursor), _
                         BTREE_HINT_RANGE, _
@@ -5519,7 +5540,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p3])
                     If pTableCursor->eCurType <> CURTYPE_BTREE OrElse _
                        pTableCursor->uc.pCursor = 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     sqlite3BtreeCursorHint( _
                         CPtr(BtCursor Ptr, pCursor->uc.pCursor), _
                         BTREE_HINT_TABLECURSOR, _
@@ -5531,33 +5552,33 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_FinishSeek
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->deferredMoveto <> 0 Then
                 Dim rc As SQLITE_C_INT = sqlite3VdbeExecFinishSeek(pCursor)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 
         Case OP_IdxRowid
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType <> CURTYPE_BTREE OrElse pCursor->isTable <> 0 OrElse _
                pCursor->uc.pCursor = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim restoreCode As SQLITE_C_INT = sqlite3VdbeCursorRestore(pCursor)
-            If restoreCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, restoreCode)
+            If restoreCode <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, restoreCode)
             If pCursor->nullRow <> 0 Then
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
             Else
                 Dim rowId As sqlite3_int64 = 0
                 Dim rc As SQLITE_C_INT = sqlite3VdbeIdxRowid( _
                     pVdbe->db, pCursor->uc.pCursor, @rowId)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], rowId)
             End If
 
@@ -5565,13 +5586,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr = _
                 CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
             If pCursor->eCurType = CURTYPE_VTAB Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pCursor->seqCount = 9223372036854775807LL Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_FULL)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_FULL)
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], pCursor->seqCount)
             pCursor->seqCount += 1
 
@@ -5585,7 +5606,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                (pVdbe->aMem[pOp->p1].flags And MEM_INT) = 0 OrElse _
                (pVdbe->aMem[pOp->p3].flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim totalRows As sqlite3_int64 = pVdbe->aMem[pOp->p1].u.i
             If totalRows <= 0 Then
                 totalRows = -1
@@ -5599,34 +5620,34 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_Gosub
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p1], programCounter)
             nextCounter = pOp->p2
 
         Case OP_Return
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                (pOp->p3 <> 0 AndAlso pOp->p3 <> 1) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pReturnAddress As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pReturnAddress->flags And MEM_INT) <> 0 Then
                 If pReturnAddress->u.i < 0 OrElse _
                    pReturnAddress->u.i >= pVdbe->nOp Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 nextCounter = CInt(pReturnAddress->u.i) + 1
             ElseIf pOp->p3 = 0 Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
         Case OP_Once
             If pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             If pVdbe->pFrame <> 0 Then
                 Dim pFrame As SqliteVdbeFrame Ptr = _
                     CPtr(SqliteVdbeFrame Ptr, pVdbe->pFrame)
                 If pFrame->aOnce = 0 OrElse pVdbe->nOp <= 0 OrElse _
                    programCounter >= pVdbe->nOp Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim byteIndex As SQLITE_C_INT = programCounter \ 8
                 Dim bitIndex As SQLITE_C_INT = programCounter And 7
                 Dim bitMask As UByte = CByte(1 Shl bitIndex)
@@ -5639,7 +5660,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Else
                 If pVdbe->nOp <= 0 OrElse _
                    pVdbe->aOp[0].opcode <> OP_Init Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pVdbe->aOp[0].p1 = pOp->p1 Then
                     nextCounter = pOp->p2
                 Else
@@ -5649,7 +5670,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_Init, OP_Trace, OP_Goto
             If pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 #ifndef SQLITE_OMIT_TRACE
             If pOp->opcode = OP_Init OrElse pOp->opcode = OP_Trace Then _
                 vdbeExecTrace(pVdbe, pOp)
@@ -5702,12 +5723,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_Integer
             If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], pOp->p1)
 
         Case OP_Int64
             If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim lowWord As ULongInt = CULngInt(CLngInt(pOp->p1)) And &HFFFFFFFFULL
             Dim highWord As ULongInt = CULngInt(CLngInt(pOp->p3)) And &HFFFFFFFFULL
             Dim valueBits As ULongInt = (highWord Shl 32) Or lowWord
@@ -5717,7 +5738,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_Real
             If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim lowWord As ULongInt = CULngInt(CLngInt(pOp->p1)) And &HFFFFFFFFULL
             Dim highWord As ULongInt = CULngInt(CLngInt(pOp->p3)) And &HFFFFFFFFULL
             Dim valueBits As ULongInt = (highWord Shl 32) Or lowWord
@@ -5728,9 +5749,9 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_Blob
             If pOp->p1 < 0 OrElse pOp->p2 <= 0 OrElse _
                pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p1 > pVdbe->db->lengthLimit Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             Dim rc As SQLITE_C_INT
             If pOp->p4.p = 0 Then
                 sqlite3VdbeMemSetZeroBlob(@pVdbe->aMem[pOp->p2], pOp->p1)
@@ -5742,33 +5763,33 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     @pVdbe->aMem[pOp->p2], CPtr(Const ZString Ptr, pOp->p4.p), _
                     pOp->p1, 0, transientDestructor)
             End If
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             pVdbe->aMem[pOp->p2].enc = pVdbe->db->enc
 
         Case OP_String8, OP_String
             If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse pOp->p4.z = 0 OrElse _
                (pOp->opcode = OP_String AndAlso pOp->p1 < 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim stringLength As SQLITE_C_INT = -1
             If pOp->opcode = OP_String Then stringLength = pOp->p1
             Dim transientDestructor As sqlite3MemDestructor = CPtr(sqlite3MemDestructor, -1)
             Dim pOutput As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             Dim rc As SQLITE_C_INT = sqlite3VdbeMemSetText( _
                 pOutput, pOp->p4.z, stringLength, transientDestructor)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             If pOp->opcode = OP_String8 AndAlso _
                pVdbe->db->enc <> SQLITE_UTF8 Then
                 ' SQL literals begin as UTF-8, while table records use the database encoding.
                 rc = sqlite3VdbeChangeEncoding(pOutput, pVdbe->db->enc)
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             End If
 #ifndef SQLITE_LIKE_DOESNT_MATCH_BLOBS
             If pOp->p3 > 0 Then
                 If pOp->p3 >= pVdbe->nMem Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim pBlobFlag As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
                 If (pBlobFlag->flags And MEM_INT) = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pBlobFlag->u.i = pOp->p5 Then
                     ' LIKE and GLOB range loops retest the upper prefix once.
                     ' The BLOB type makes the repeated lower-bound seek pass text keys.
@@ -5781,10 +5802,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_BeginSubrtn, OP_Null
             If pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim lastRegister As SQLITE_C_INT = pOp->p2
             If pOp->p3 > pOp->p2 Then lastRegister = pOp->p3
-            If lastRegister >= pVdbe->nMem Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            If lastRegister >= pVdbe->nMem Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             For iRegister As SQLITE_C_INT = pOp->p2 To lastRegister
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[iRegister])
                 pVdbe->aMem[iRegister].n = 0
@@ -5803,27 +5824,27 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p3 <= 0 OrElse _
                pOp->p3 >= pVdbe->nMem OrElse _
                pOp->p5 > SQLITE_MAX_FUNCTION_ARG Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pFunction As SqliteFuncDef Ptr = _
                 CPtr(SqliteFuncDef Ptr, pOp->p4.p)
             Dim argumentCount As SQLITE_C_INT = pOp->p5
             If pFunction->xSFunc = 0 OrElse pFunction->xFinalize = 0 OrElse _
                (inverseStep <> 0 AndAlso pFunction->xInverse = 0) OrElse _
                sqlite3VdbeAggregateArgCountValid(pFunction, argumentCount) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If argumentCount > 0 AndAlso _
                (pOp->p2 <= 0 OrElse _
                 pOp->p2 > pVdbe->nMem - argumentCount + 1 OrElse _
                 (pOp->p3 >= pOp->p2 AndAlso _
                  pOp->p3 < pOp->p2 + argumentCount)) Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
             Dim pAccumulator As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
             If (pAccumulator->flags And Not (MEM_NULL Or MEM_AGG)) <> 0 OrElse _
                ((pAccumulator->flags And MEM_AGG) <> 0 AndAlso _
                 pAccumulator->u.pDef <> pFunction) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pAccumulator->n < &H7FFFFFFF Then pAccumulator->n += 1
 
             For iArgument As SQLITE_C_INT = 0 To argumentCount - 1
@@ -5865,7 +5886,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         aggregateContext.skipFlag = 0
                         aggregateContext.isError = 0
                         sqlite3VdbeMemRelease(@aggregateResult)
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     End If
                     Dim skipRegister As SQLITE_C_INT = _
                         pVdbe->aOp[programCounter - 1].p1
@@ -5873,7 +5894,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         aggregateContext.skipFlag = 0
                         aggregateContext.isError = 0
                         sqlite3VdbeMemRelease(@aggregateResult)
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     End If
                     If skipRegister <> 0 Then _
                         sqlite3VdbeMemSetInt64( _
@@ -5883,34 +5904,34 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 sqlite3VdbeMemRelease(@aggregateResult)
                 aggregateContext.isError = 0
                 If aggregateError > 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, aggregateError)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, aggregateError)
             End If
             sqlite3VdbeMemRelease(@aggregateResult)
             If pVdbe->db->mallocFailed <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
         Case OP_AggValue, OP_AggFinal
             If pOp->p4type <> P4_FUNCDEF OrElse pOp->p4.p = 0 OrElse _
                pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 < 0 OrElse _
                pOp->p2 > SQLITE_MAX_FUNCTION_ARG Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pOp->opcode = OP_AggFinal AndAlso pOp->p3 <> 0) OrElse _
                (pOp->opcode = OP_AggValue AndAlso _
                 (pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                  pOp->p3 = pOp->p1)) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pFunction As SqliteFuncDef Ptr = _
                 CPtr(SqliteFuncDef Ptr, pOp->p4.p)
             If (pOp->opcode = OP_AggFinal AndAlso pFunction->xFinalize = 0) OrElse _
                (pOp->opcode = OP_AggValue AndAlso pFunction->xValue = 0) OrElse _
                sqlite3VdbeAggregateArgCountValid(pFunction, pOp->p2) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pAccumulator As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pAccumulator->flags And Not (MEM_NULL Or MEM_AGG)) <> 0 OrElse _
                ((pAccumulator->flags And MEM_AGG) <> 0 AndAlso _
                 pAccumulator->u.pDef <> pFunction) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pAggregateResult As SqliteVdbeMem Ptr = pAccumulator
             Dim aggregateFinishCode As SQLITE_C_INT
             If pOp->opcode = OP_AggValue Then
@@ -5927,38 +5948,38 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If errorText <> 0 Then _
                     sqlite3VdbeError( _
                         pVdbe, StrPtr(!"%s"), CPtr(Const ZString Ptr, errorText))
-                Return sqlite3VdbeExecError(pVdbe, aggregateFinishCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, aggregateFinishCode)
             End If
             Dim aggregateEncodingCode As SQLITE_C_INT = _
                 sqlite3VdbeChangeEncoding(pAggregateResult, pVdbe->db->enc)
             If aggregateEncodingCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, aggregateEncodingCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, aggregateEncodingCode)
             If pVdbe->db->mallocFailed <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
         Case OP_Function, OP_PureFunc
             If pOp->p4type <> P4_FUNCCTX OrElse pOp->p4.p = 0 OrElse _
                pOp->p3 <= 0 OrElse _
                pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             ' P1 is the constant-argument bitmask used by sqlite3_set_auxdata.
             Dim pContext As SqliteResultContext Ptr = _
                 CPtr(SqliteResultContext Ptr, pOp->p4.p)
             Dim pFunction As SqliteFuncDef Ptr = _
                 CPtr(SqliteFuncDef Ptr, pContext->pFunc)
-            If pFunction = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            If pFunction = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pFunction->xSFunc = 0 OrElse _
                (pFunction->nArg >= 0 AndAlso _
                 pFunction->nArg <> pContext->argc) OrElse _
                (pFunction->nArg = -3 AndAlso pContext->argc < 1) OrElse _
                (pFunction->nArg = -4 AndAlso pContext->argc < 2) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pContext->argc = 0 Then
                 If pOp->p2 <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             ElseIf pOp->p2 <= 0 OrElse _
                    pOp->p2 > pVdbe->nMem - pContext->argc + 1 Then
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
             pContext->pOut = @pVdbe->aMem[pOp->p3]
@@ -5994,7 +6015,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         pContext->skipFlag = 0
                         sqlite3VdbeMemSetNull(pContext->pOut)
                         pContext->isError = 0
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     End If
                     Dim skipRegister As SQLITE_C_INT = _
                         pVdbe->aOp[programCounter - 1].p1
@@ -6002,7 +6023,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         pContext->skipFlag = 0
                         sqlite3VdbeMemSetNull(pContext->pOut)
                         pContext->isError = 0
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     End If
                     If skipRegister <> 0 Then _
                         sqlite3VdbeMemSetInt64(@pVdbe->aMem[skipRegister], 1)
@@ -6015,24 +6036,24 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     pVdbe->db, @pVdbe->pAuxData, programCounter, pOp->p1)
                 pContext->isError = 0
                 If functionError > 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, functionError)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, functionError)
             End If
             If pVdbe->db->mallocFailed <> 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
 
         Case OP_Variable
             If pVdbe->aVar = 0 OrElse pOp->p1 <= 0 OrElse _
                pOp->p1 > pVdbe->nVar OrElse pOp->p2 <= 0 OrElse _
                pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pVariable As SqliteVdbeMem Ptr = @pVdbe->aVar[pOp->p1 - 1]
             If (pVariable->flags And (MEM_STR Or MEM_BLOB)) <> 0 Then
-                If pVariable->n < 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                If pVariable->n < 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim variableBytes As sqlite3_uint64 = CULngInt(pVariable->n)
                 If (pVariable->flags And MEM_ZERO) <> 0 AndAlso pVariable->u.nZero > 0 Then _
                     variableBytes += CULngInt(pVariable->u.nZero)
                 If variableBytes > CULngInt(pVdbe->db->lengthLimit) Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_TOOBIG)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_TOOBIG)
             End If
             sqlite3VdbeMemShallowCopy( _
                 @pVdbe->aMem[pOp->p2], pVariable, MEM_STATIC)
@@ -6040,17 +6061,17 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_Add, OP_Subtract, OP_Multiply, OP_Divide, OP_Remainder
             Dim rc As SQLITE_C_INT = sqlite3VdbeExecArithmetic(pVdbe, pOp)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
 
         Case OP_Concat
             Dim rc As SQLITE_C_INT = sqlite3VdbeExecConcat(pVdbe, pOp)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
 
         Case OP_BitAnd, OP_BitOr, OP_ShiftLeft, OP_ShiftRight
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pLeft As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             Dim pRight As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             Dim pOutput As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p3]
@@ -6098,7 +6119,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim shouldJump As SQLITE_C_INT
             Dim rc As SQLITE_C_INT = sqlite3VdbeExecComparison( _
                 pVdbe, pOp, shouldJump, compareResult)
-            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+            If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
             If shouldJump <> 0 Then nextCounter = pOp->p2
             If shouldJump = 0 AndAlso _
                (pOp->opcode = OP_Lt OrElse pOp->opcode = OP_Gt) Then
@@ -6110,7 +6131,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_ElseEq
             If compareReady <> 2 OrElse programCounter <= 0 OrElse _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim previousCompareAddress As SQLITE_C_INT = programCounter - 1
             While previousCompareAddress >= 0 AndAlso _
                   pVdbe->aOp[previousCompareAddress].opcode = OP_ReleaseReg
@@ -6119,24 +6140,24 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If previousCompareAddress < 0 OrElse _
                (pVdbe->aOp[previousCompareAddress].opcode <> OP_Lt AndAlso _
                 pVdbe->aOp[previousCompareAddress].opcode <> OP_Gt) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If compareResult = 0 Then nextCounter = pOp->p2
             compareReady = 0
 
         Case OP_Permutation
             If pOp->p4type <> P4_INTARRAY OrElse pOp->p4.p = 0 OrElse _
                programCounter + 1 >= pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pPermutationOp As SqliteVdbeOp Ptr = _
                 @pVdbe->aOp[programCounter + 1]
             If pPermutationOp->opcode <> OP_Compare OrElse _
                (pPermutationOp->p5 And OPFLAG_PERMUTE) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pPermutation As SQLITE_C_INT Ptr = _
                 CPtr(SQLITE_C_INT Ptr, pOp->p4.p)
             If pPermutation[0] <= 0 OrElse _
                pPermutation[0] < pPermutationOp->p3 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
         Case OP_Compare
             If pOp->p3 <= 0 OrElse pOp->p4type <> P4_KEYINFO OrElse _
@@ -6144,15 +6165,15 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pVdbe->nCursor < 0 OrElse pVdbe->nCursor > pVdbe->nMem OrElse _
                programCounter + 1 >= pVdbe->nOp OrElse _
                pVdbe->aOp[programCounter + 1].opcode <> OP_Jump Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCompareKey As sqlite3VdbeKeyInfoPrefix Ptr = _
                 CPtr(sqlite3VdbeKeyInfoPrefix Ptr, pOp->p4.pKeyInfo)
             If pCompareKey->nKeyField < pOp->p3 OrElse _
                pCompareKey->aSortFlags = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim maxRegister As SQLITE_C_INT = pVdbe->nMem - pVdbe->nCursor
             If pOp->p1 <= 0 OrElse pOp->p2 <= 0 OrElse maxRegister <= 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim pPermutation As SQLITE_C_INT Ptr = 0
             If (pOp->p5 And OPFLAG_PERMUTE) <> 0 Then
@@ -6160,11 +6181,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                    pVdbe->aOp[programCounter - 1].opcode <> OP_Permutation OrElse _
                    pVdbe->aOp[programCounter - 1].p4type <> P4_INTARRAY OrElse _
                    pVdbe->aOp[programCounter - 1].p4.p = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pPermutation = CPtr(SQLITE_C_INT Ptr, _
                     pVdbe->aOp[programCounter - 1].p4.p)
                 If pPermutation[0] < pOp->p3 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             End If
 
             ' The permutation selects registers; KeyInfo fields stay in order.
@@ -6176,10 +6197,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                     If registerOffset < 0 OrElse _
                        registerOffset > maxRegister - pOp->p1 OrElse _
                        registerOffset > maxRegister - pOp->p2 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 ElseIf compareIndex > maxRegister - pOp->p1 OrElse _
                        compareIndex > maxRegister - pOp->p2 Then
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 End If
 
                 Dim leftIndex As SQLITE_C_INT = pOp->p1 + registerOffset
@@ -6188,7 +6209,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Dim pRight As SqliteVdbeMem Ptr = @pVdbe->aMem[rightIndex]
                 If (pLeft->flags And MEM_UNDEFINED) <> 0 OrElse _
                    (pRight->flags And MEM_UNDEFINED) <> 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 compareResult = sqlite3MemCompare( _
                     pLeft, pRight, pCompareKey->aColl(compareIndex))
                 If compareResult <> 0 Then
@@ -6212,7 +6233,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p1 > pVdbe->nOp OrElse pOp->p2 < 0 OrElse _
                pOp->p2 > pVdbe->nOp OrElse pOp->p3 < 0 OrElse _
                pOp->p3 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If compareResult < 0 Then
                 nextCounter = pOp->p1
             ElseIf compareResult = 0 Then
@@ -6227,12 +6248,12 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p1 >= pVdbe->nMem OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 > pVdbe->nMem - 1 - pOp->p1 OrElse _
                pOp->p3 > pVdbe->nMem - 1 - pOp->p2 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             For iCopy As SQLITE_C_INT = 0 To pOp->p3
                 Dim rc As SQLITE_C_INT = sqlite3VdbeMemCopy( _
                     @pVdbe->aMem[pOp->p2 + iCopy], _
                     @pVdbe->aMem[pOp->p1 + iCopy])
-                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, rc)
+                If rc <> SQLITE_OK Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, rc)
                 If (pOp->p5 And &H02) <> 0 Then _
                     pVdbe->aMem[pOp->p2 + iCopy].flags = _
                         pVdbe->aMem[pOp->p2 + iCopy].flags And Not MEM_SUBTYPE
@@ -6241,7 +6262,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_SCopy
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             sqlite3VdbeMemShallowCopy( _
                 @pVdbe->aMem[pOp->p2], @pVdbe->aMem[pOp->p1], MEM_EPHEM)
 #ifdef SQLITE_DEBUG
@@ -6254,7 +6275,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                (pVdbe->aMem[pOp->p1].flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             sqlite3VdbeMemSetInt64( _
                 @pVdbe->aMem[pOp->p2], pVdbe->aMem[pOp->p1].u.i)
 
@@ -6264,7 +6285,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 > pVdbe->nMem - pOp->p3 OrElse _
                (pOp->p1 < pOp->p2 + pOp->p3 AndAlso _
                 pOp->p2 < pOp->p1 + pOp->p3) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             For iMove As SQLITE_C_INT = 0 To pOp->p3 - 1
                 sqlite3VdbeMemMove( _
                     @pVdbe->aMem[pOp->p2 + iMove], _
@@ -6273,7 +6294,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 
         Case OP_MustBeInt
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pInteger As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pInteger->flags And MEM_INT) = 0 Then
                 sqlite3ApplyNumericAffinity(pInteger, 1)
@@ -6282,21 +6303,21 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             End If
             If (pInteger->flags And MEM_INT) = 0 Then
                 If pOp->p2 = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_MISMATCH)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISMATCH)
                 If pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 nextCounter = pOp->p2
             Else
                 If sqlite3VdbeMemIntegerify(pInteger) <> SQLITE_OK Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_MISMATCH)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISMATCH)
             End If
 
         Case OP_AddImm
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pInteger As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If sqlite3VdbeMemIntegerify(pInteger) <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_MISMATCH)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISMATCH)
             Dim valueBits As ULongInt = CULngInt(pInteger->u.i) + _
                                         CULngInt(CLngInt(pOp->p2))
             sqlite3VdbeExecMemcpy(@pInteger->u.i, @valueBits, SizeOf(valueBits))
@@ -6307,7 +6328,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 >= pVdbe->nMem OrElse pOp->p3 <> 0 OrElse _
                pOp->p4type <> P4_NOTUSED OrElse pOp->p5 <> 0 OrElse _
                pVdbe->aMem = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pRootFrame As SqliteVdbeFrame Ptr = _
                 CPtr(SqliteVdbeFrame Ptr, pVdbe->pFrame)
             While pRootFrame <> 0 AndAlso pRootFrame->pParent <> 0
@@ -6318,18 +6339,18 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pRootFrame <> 0 Then
                 rootRegisterLimit = pRootFrame->nMem - pRootFrame->nCursor
                 If pOp->p1 > rootRegisterLimit OrElse pRootFrame->aMem = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pMaximum = @pRootFrame->aMem[pOp->p1]
             Else
                 rootRegisterLimit = pVdbe->nMem - pVdbe->nCursor
                 If pOp->p1 > rootRegisterLimit Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 pMaximum = @pVdbe->aMem[pOp->p1]
             End If
             Dim pCandidate As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p2]
             If sqlite3VdbeMemIntegerify(pMaximum) <> SQLITE_OK OrElse _
                sqlite3VdbeMemIntegerify(pCandidate) <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_MISMATCH)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_MISMATCH)
             If pMaximum->u.i < pCandidate->u.i Then _
                 pMaximum->u.i = pCandidate->u.i
 #endif
@@ -6338,29 +6359,29 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim programCode As SQLITE_C_INT = vdbeExecStartProgram( _
                 pVdbe, pOp, programCounter, nextCounter)
             If programCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, programCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, programCode)
 
         Case OP_Param
             If pVdbe->pFrame = 0 OrElse pOp->p1 < 0 OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
         Dim pCurrentFrame As SqliteVdbeFrame Ptr = _
             CPtr(SqliteVdbeFrame Ptr, pVdbe->pFrame)
         If pCurrentFrame->aMem = 0 OrElse pCurrentFrame->aOp = 0 OrElse _
            pCurrentFrame->pc < 0 OrElse _
            pCurrentFrame->pc >= pCurrentFrame->nOp Then _
-            Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
         Dim pCallingOp As SqliteVdbeOp Ptr = _
             @pCurrentFrame->aOp[pCurrentFrame->pc]
         If pCallingOp->opcode <> OP_Program OrElse pOp->p1 < 0 OrElse _
            CLngInt(pCallingOp->p1) < -CLngInt(pCurrentFrame->nMem) OrElse _
            pCallingOp->p1 > pCurrentFrame->nMem Then _
-            Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
         Dim sourceRegister As sqlite3_int64 = _
             CLngInt(pCallingOp->p1) + CLngInt(pOp->p1)
         If sourceRegister < 0 OrElse _
            sourceRegister >= pCurrentFrame->nMem Then _
-            Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
         sqlite3VdbeMemShallowCopy( _
                 @pVdbe->aMem[pOp->p2], _
                 @pCurrentFrame->aMem[CLng(sourceRegister)], _
@@ -6369,16 +6390,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_IfPos, OP_IfNotZero, OP_DecrJumpZero
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pInteger As SqliteVdbeMem Ptr = @pVdbe->aMem[pOp->p1]
             If (pInteger->flags And MEM_INT) = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Select Case pOp->opcode
             Case OP_IfPos
                 If pInteger->u.i > 0 Then
                     Dim result As sqlite3_int64 = pInteger->u.i
                     If sqlite3SubInt64(@result, pOp->p3) <> 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     pInteger->u.i = result
                     nextCounter = pOp->p2
                 End If
@@ -6397,11 +6418,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < -1 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 < 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pOp->p4type <> P4_INT32 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pOp->p1 < 0 AndAlso _
                 (pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem)) OrElse _
                (pOp->p1 >= 0 AndAlso pOp->p3 < 0) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
             Dim valueMask As UShort = 0
             If pOp->p1 < 0 Then
@@ -6421,16 +6442,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 valueMask = CUShort(1 Shl (valueType - 1))
             Else
                 If pVdbe->apCsr = 0 OrElse pVdbe->apCsr[pOp->p1] = 0 Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 Dim pTypeCursor As SqliteVdbeCursor Ptr = _
                     CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
                 If pTypeCursor->nField < 0 OrElse _
                    pTypeCursor->nHdrParsed > pTypeCursor->nField Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If pOp->p3 < pTypeCursor->nHdrParsed Then
                     If pTypeCursor->aOffset = 0 OrElse _
                        pTypeCursor->nField <= 0 Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     Dim pSerialTypes As u32 Ptr = _
                         pTypeCursor->aOffset - pTypeCursor->nField
                     Dim serialType As u32 = pSerialTypes[pOp->p3]
@@ -6449,13 +6470,13 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                         Case 7
                             valueMask = &H02
                         Case Else
-                            Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                         End Select
                     End If
                 Else
                     If pOp->p4.i < SQLITE_INTEGER OrElse _
                        pOp->p4.i > SQLITE_NULL Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     valueMask = CUShort(1 Shl (pOp->p4.i - 1))
                 End If
             End If
@@ -6464,7 +6485,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_If, OP_IfNot
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim nullTakesJump As SQLITE_C_INT = pOp->p3
             If pOp->opcode = OP_IfNot Then _
                 nullTakesJump = IIf(pOp->p3 = 0, 1, 0)
@@ -6476,7 +6497,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_IsNull, OP_NotNull
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim isNull As Long = IIf( _
                 (pVdbe->aMem[pOp->p1].flags And MEM_NULL) <> 0, 1, 0)
             If (pOp->opcode = OP_IsNull AndAlso isNull <> 0) OrElse _
@@ -6487,7 +6508,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If ((pVdbe->aMem[pOp->p1].flags Or pVdbe->aMem[pOp->p3].flags) And _
                 MEM_NULL) <> 0 Then
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
@@ -6499,7 +6520,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pVdbe->apCsr[pOp->p1] = 0 Then
                 nextCounter = pOp->p2
             Else
@@ -6513,7 +6534,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                pOp->p2 <= 0 OrElse pOp->p2 > pVdbe->nOp OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pVdbe->apCsr[pOp->p1] <> 0 Then
                 Dim pCursor As SqliteVdbeCursor Ptr = _
                     CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
@@ -6526,11 +6547,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_NullRow
             If pOp->p1 < 0 OrElse pOp->p1 >= pVdbe->nCursor OrElse _
                pVdbe->apCsr = 0 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim pCursor As SqliteVdbeCursor Ptr
             If pVdbe->apCsr[pOp->p1] = 0 Then
                 pCursor = allocateCursor(pVdbe, pOp->p1, 1, CURTYPE_PSEUDO)
-                If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+                If pCursor = 0 Then Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
                 pCursor->isTable = 1
             Else
                 pCursor = CPtr(SqliteVdbeCursor Ptr, pVdbe->apCsr[pOp->p1])
@@ -6547,7 +6568,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem OrElse _
                pOp->p3 <= 0 OrElse pOp->p3 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim leftBoolean As SQLITE_C_INT = sqlite3VdbeBooleanValue( _
                 @pVdbe->aMem[pOp->p1], 2)
             Dim rightBoolean As SQLITE_C_INT = sqlite3VdbeBooleanValue( _
@@ -6582,7 +6603,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                (pOp->p3 <> 0 AndAlso pOp->p3 <> 1) OrElse _
                pOp->p4type <> P4_INT32 OrElse _
                (pOp->p4.i <> 0 AndAlso pOp->p4.i <> 1) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim booleanResult As SQLITE_C_INT = sqlite3VdbeBooleanValue( _
                 @pVdbe->aMem[pOp->p1], pOp->p3) Xor pOp->p4.i
             sqlite3VdbeMemSetInt64(@pVdbe->aMem[pOp->p2], booleanResult)
@@ -6590,7 +6611,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_Not
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p1].flags And MEM_NULL) <> 0 Then
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
             Else
@@ -6603,7 +6624,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_BitNot
             If pOp->p1 <= 0 OrElse pOp->p1 >= pVdbe->nMem OrElse _
                pOp->p2 <= 0 OrElse pOp->p2 >= pVdbe->nMem Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p1].flags And MEM_NULL) <> 0 Then
                 sqlite3VdbeMemSetNull(@pVdbe->aMem[pOp->p2])
             Else
@@ -6614,7 +6635,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 #ifndef SQLITE_OMIT_FOREIGN_KEY
         Case OP_FkCounter
             If pOp->p1 < 0 OrElse pOp->p1 > 1 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p1 <> 0 Then
                 pVdbe->db->nDeferredCons += pOp->p2
             ElseIf (pVdbe->db->flags And SQLITE_DeferFKs) <> 0 Then
@@ -6626,7 +6647,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
         Case OP_FkIfZero
             If pOp->p1 < 0 OrElse pOp->p1 > 1 OrElse _
                pOp->p2 < 0 OrElse pOp->p2 >= pVdbe->nOp Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p1 <> 0 Then
                 If pVdbe->db->nDeferredCons = 0 AndAlso _
                    pVdbe->db->nDeferredImmCons = 0 Then nextCounter = pOp->p2
@@ -6640,7 +6661,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If foreignKeyCode <> SQLITE_OK Then
                 Dim abortCode As SQLITE_C_INT = pVdbe->rc
                 If abortCode = SQLITE_OK Then abortCode = foreignKeyCode
-                Return sqlite3VdbeExecError(pVdbe, abortCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, abortCode)
             End If
 #endif
 
@@ -6648,10 +6669,10 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             If pOp->p1 <= 0 OrElse pOp->p2 < 0 OrElse _
                pOp->p2 <> pVdbe->nResColumn OrElse _
                 pOp->p1 > pVdbe->nMem OrElse pOp->p2 > pVdbe->nMem - pOp->p1 + 1 Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             Dim resultProgressCode As SQLITE_C_INT = sqlite3VdbeExecProgressCheck(pVdbe)
             If resultProgressCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, resultProgressCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, resultProgressCode)
             pVdbe->cacheCtr = (pVdbe->cacheCtr + 2) Or 1
             pVdbe->pResultRow = @pVdbe->aMem[pOp->p1]
             pVdbe->pc = nextCounter
@@ -6678,7 +6699,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                (pOp->p4type <> P4_NOTUSED AndAlso _
                 pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If (pVdbe->aMem[pOp->p3].flags And MEM_NULL) = 0 Then Exit Select
 
             If pOp->p1 <> SQLITE_OK Then
@@ -6715,7 +6736,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Dim haltIfNullProgress As SQLITE_C_INT = _
                 sqlite3VdbeExecProgressCheck(pVdbe)
             If haltIfNullProgress <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, haltIfNullProgress)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, haltIfNullProgress)
             Dim haltIfNullResult As SQLITE_C_INT = _
                 sqlite3VdbeExecFinish(pVdbe, pOp->p1, pOp->p2)
             Dim haltIfNullStepResult As SQLITE_C_INT = _
@@ -6728,7 +6749,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 Dim pCompletedFrame As SqliteVdbeFrame Ptr = _
                     CPtr(SqliteVdbeFrame Ptr, pVdbe->pFrame)
                 If pVdbe->nFrame <= 0 OrElse pCompletedFrame->v <> pVdbe Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
 
                 Dim haltAction As SQLITE_C_INT = pOp->p2
                 pVdbe->pFrame = pCompletedFrame->pParent
@@ -6739,7 +6760,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                 If parentProgramCounter < 0 OrElse _
                    parentProgramCounter >= pVdbe->nOp OrElse _
                    pVdbe->aOp[parentProgramCounter].opcode <> OP_Program Then _
-                    Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                    Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                 If haltAction = OE_IGNORE Then
                     nextCounter = pVdbe->aOp[parentProgramCounter].p2
                 Else
@@ -6752,11 +6773,11 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
                (pOp->p4type <> P4_NOTUSED AndAlso _
                 pOp->p4type <> P4_STATIC AndAlso _
                 pOp->p4type <> P4_DYNAMIC) Then _
-                Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
             If pOp->p1 <> SQLITE_OK Then
                 If pOp->p3 > 0 AndAlso pOp->p4type = P4_NOTUSED Then
                     If pOp->p3 >= pVdbe->nMem Then _
-                        Return sqlite3VdbeExecError(pVdbe, SQLITE_CORRUPT)
+                        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_CORRUPT)
                     Dim zError As Const ZString Ptr = CPtr( _
                         Const ZString Ptr, sqlite3ValueText( _
                             @pVdbe->aMem[pOp->p3], SQLITE_UTF8))
@@ -6787,7 +6808,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             End If
             Dim haltProgressCode As SQLITE_C_INT = sqlite3VdbeExecProgressCheck(pVdbe)
             If haltProgressCode <> SQLITE_OK Then _
-                Return sqlite3VdbeExecError(pVdbe, haltProgressCode)
+                Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, haltProgressCode)
             Dim haltOpcodeResult As SQLITE_C_INT = _
                 sqlite3VdbeExecFinish(pVdbe, pOp->p1, pOp->p2)
             Dim haltStepResult As SQLITE_C_INT = _
@@ -6800,7 +6821,7 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
             Return haltStepResult
 
         Case Else
-            Return sqlite3VdbeExecError(pVdbe, SQLITE_ERROR)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_ERROR)
         End Select
 
 #ifdef SQLITE_TEST
@@ -6842,16 +6863,16 @@ Function sqlite3VdbeExec CDecl Alias "sqlite3VdbeExec" ( _
 #endif
         Dim loopProgressCode As SQLITE_C_INT = sqlite3VdbeExecProgressCheck(pVdbe)
         If loopProgressCode <> SQLITE_OK Then _
-            Return sqlite3VdbeExecError(pVdbe, loopProgressCode)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, loopProgressCode)
         If pVdbe->db->mallocFailed <> 0 Then _
-            Return sqlite3VdbeExecError(pVdbe, SQLITE_NOMEM)
+            Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, SQLITE_NOMEM)
         pVdbe->pc = nextCounter
         programCounter = nextCounter
     Wend
 
     Dim finalProgressCode As SQLITE_C_INT = sqlite3VdbeExecProgressCheck(pVdbe)
     If finalProgressCode <> SQLITE_OK Then _
-        Return sqlite3VdbeExecError(pVdbe, finalProgressCode)
+        Return sqlite3VdbeExecError(pVdbe, pOp, pVdbe->aOp, finalProgressCode)
     Dim execFinishResult As SQLITE_C_INT = _
         sqlite3VdbeExecFinish(pVdbe, SQLITE_OK, OE_ABORT)
     sqlite3VdbeLeave(pVdbe)

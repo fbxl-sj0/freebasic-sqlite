@@ -5,15 +5,17 @@
 
     Purpose:
 
-        Preserve compile-clean C2FB procedures from src/window.c.
+        Preserve compile-clean VDBE helper procedures from src/vdbe.c.
 
     Responsibilities:
 
-        - Implement newly mapped procedures accepted by the per-procedure compiler check.
+        - Implement translated numeric-type and VDBE error-log helpers.
         - Keep translated file-local dependencies beside their callers.
+        - Provide an internal bridge to the hand-maintained VDBE dispatcher.
 
     This file intentionally does NOT contain:
 
+        - The VDBE instruction dispatcher.
         - Procedures that failed conversion or compilation.
         - A claim that compile acceptance establishes behavior parity.
 '/
@@ -895,6 +897,17 @@ Private Sub sqlite3VdbeLogAbort CDecl Alias "sqlite3VdbeLogAbort" (ByVal arg0 As
     c2fb_temp_3 = Cast(SQLITE_C_INT, Cast(SQLITE_C_INT, ((arg2 - arg3))))
     local2 = c2fb_temp_3
     sqlite3_log(arg1, StrPtr(!"statement aborts at %d: %s; [%s%s]"), local2, arg0->zErrMsg, local1, local0)
+End Sub
+
+' Keep the C2FB body private while making the same log path callable from the
+' hand-maintained VDBE dispatcher in sqlite3_vdbe_exec.bas.
+Sub fbSqlite3VdbeLogAbort CDecl Alias "fbSqlite3VdbeLogAbort" ( _
+    ByVal arg0 As SqliteVdbe Ptr, _
+    ByVal arg1 As SQLITE_C_INT, _
+    ByVal arg2 As SqliteVdbeOp Ptr, _
+    ByVal arg3 As SqliteVdbeOp Ptr _
+)
+    sqlite3VdbeLogAbort(arg0, arg1, arg2, arg3)
 End Sub
 
 /' end of sqlite3_bulk26_vdbe.bas '/

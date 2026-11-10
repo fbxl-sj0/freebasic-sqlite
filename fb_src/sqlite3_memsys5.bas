@@ -59,8 +59,7 @@ End Type
 Private Dim Shared memsys5State As SqliteMem5Global
 
 #ifdef SQLITE_TEST
-Extern memsys5Stdout Alias "stdout" As Any Ptr
-Extern memsys5Stderr Alias "stderr" As Any Ptr
+#include once "crt/stdio.bi"
 Declare Function memsys5Fopen CDecl Alias "fopen" ( _
     ByVal zFilename As Const ZString Ptr, _
     ByVal zMode As Const ZString Ptr _
@@ -428,14 +427,13 @@ Sub sqlite3Memsys5Dump CDecl Alias "sqlite3Memsys5Dump" ( _
     Dim pOutput As Any Ptr = 0
     Dim closeOutput As SQLITE_C_INT = 0
     If zFilename = 0 OrElse zFilename[0] = 0 Then
-        pOutput = memsys5Stdout
+        pOutput = stdout
     Else
         pOutput = memsys5Fopen(zFilename, StrPtr("w"))
         If pOutput = 0 Then
-            If memsys5Stderr <> 0 Then _
-                memsys5Fprintf(memsys5Stderr, _
-                    StrPtr(!"** Unable to output memory debug output log: %s **\n"), _
-                    zFilename)
+            memsys5Fprintf(stderr, _
+                StrPtr(!"** Unable to output memory debug output log: %s **\n"), _
+                zFilename)
             Return
         End If
         closeOutput = 1

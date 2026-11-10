@@ -37,7 +37,7 @@ End Extern
 Private Const SQLITE_FP_POWERSOF10_FIRST As Long = -348
 Private Const SQLITE_FP_POWERSOF10_LAST As Long = 347
 Private Const SQLITE_FP_MANTISSA_LIMIT As ULongInt = 1844674407370955160
-Private Const SQLITE_FP_WORD_MASK As ULongInt = &HFFFFFFFF
+Private Const SQLITE_FP_WORD_MASK As ULongInt = &HFFFFFFFFULL
 
 Private Type SqliteFpDecode
     n As Long

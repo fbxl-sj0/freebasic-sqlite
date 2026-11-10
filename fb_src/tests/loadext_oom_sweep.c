@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 /*
     Project: SQLite FreeBASIC port verification
     File: loadext_oom_sweep.c
@@ -8,6 +7,7 @@
     recovery and initializer registration, and check allocator cleanup.
     This file intentionally does NOT contain: SQLite implementation code.
 */
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <math.h>
 #include <stdio.h>

@@ -893,8 +893,8 @@ Private Function pragmaVtabLocate(ByVal zName As Const ZString Ptr) As Const Sql
         End If
     Wend
 
-#ifdef SQLITE_DEBUG
-    ' The generated release table omits debug-only table-valued pragmas.
+#if defined(SQLITE_DEBUG) OrElse defined(SQLITE_TEST)
+    ' The generated release table omits test/debug-only table-valued pragmas.
     Dim pDebugName As Const SqlitePragmaName Ptr = sqlite3DebugPragmaLocate(zName)
     If pDebugName <> 0 Then Return pDebugName
 #endif

@@ -1,4 +1,3 @@
-#define _GNU_SOURCE
 /*
     Project: SQLite FreeBASIC port verification
     -------------------------------------------
@@ -18,6 +17,7 @@
         • SQLite implementation code
         • changes to upstream test scripts
 */
+#define _GNU_SOURCE
 #include <dlfcn.h>
 #include <link.h>
 #include <stdio.h>
